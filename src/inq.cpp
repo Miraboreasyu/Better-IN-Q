@@ -13,6 +13,7 @@
 #include "hook.h"
 #include "i18n.h"
 #include "log.h"
+#include "restart_watchdog.h"
 
 #include <windows.h>
 #include <atomic>
@@ -545,6 +546,15 @@ bool g_pendingLink = false;
 bool g_hasPendingLink = false;
 int g_savedRadial = -1;                 // CT 的 wassetting：套道具前「联动快捷栏」原来的值
 std::uintptr_t g_savedRadialSlot = 0;    // 必须恢复到当时改过的同一个存档槽
+RestartWatchdog g_restartWatchdog;       // 主循环拥有；新请求/取消/停用都重置
+
+// Control operations (Tick/requests/enable/cancel) are serialized by the main
+// loop's existing Model lock. Hooks must never call these draining operations.
+void OpenEntrances()
+{
+    ::InterlockedExchange(reinterpret_cast<volatile LONG*>(&g_gateEnabled), 1);
+    g_enabled.store(true, std::memory_order_release);
+}
 
 void RestoreRadial()
 {
@@ -554,20 +564,53 @@ void RestoreRadial()
     g_savedRadial = -1;
     g_savedRadialSlot = 0;
 }
+
+void CloseAndDrain()
+{
+    ::InterlockedExchange(reinterpret_cast<volatile LONG*>(&g_gateEnabled), 0);
+    g_enabled.store(false, std::memory_order_release);
+    // Never call with a live ActiveCall (in particular, not from Tick's work
+    // scope). Drain before clearing restart: an admitted callback/gate can
+    // still publish a later stage until its inflight count reaches zero.
+    while (g_inflight.load(std::memory_order_acquire) != 0 ||
+           ::InterlockedCompareExchange(reinterpret_cast<volatile LONG*>(&g_gateInflight), 0, 0) != 0)
+        ::Sleep(0);
 }
 
-void CancelPending()
+RestartWatchdog::Loading ReadLoading()
 {
-    // 先由 SetEnabled(false) 阻止新回调，再等待已进入的回调退出，最后统一清空。
+    const std::uintptr_t ui = Ui();
+    const std::uintptr_t load = ui ? P(ui + 0x20) : 0;
+    if (!load || !Readable(load + 0x1D04, sizeof(std::uint32_t)))
+        return RestartWatchdog::Loading::Unknown;
+    return Rd<std::uint32_t>(load + 0x1D04) != 0
+        ? RestartWatchdog::Loading::Busy : RestartWatchdog::Loading::Idle;
+}
+
+void ClearPendingAfterDrain()
+{
+    // Called only after both entrances are closed and all writers have drained.
+    g_restartWatchdog.Reset();
     ::InterlockedExchange(reinterpret_cast<volatile LONG*>(&g.restart), 0);
     g.optResetOnly = 0;
     g.equipLoadout = 0;
+    g.itemLoadout = 0;
     g_pendingEquipApply.store(0, std::memory_order_release);
     g_pendingSetItem = 0;
     g_pendingLink = false;
     g_hasPendingLink = false;
     g.message = 0;
     g_enteredQuest.exchange(0, std::memory_order_acq_rel);
+}
+} // namespace
+
+void CancelPending()
+{
+    const bool wasEnabled = Enabled();
+    SetEnabled(false);
+    // Cancellation must not resnapshot the entered-quest baseline or reapply
+    // options: retain the user's current effective quest/food/reset settings.
+    if (wasEnabled) OpenEntrances();
 }
 
 void SetEnabled(bool enabled)
@@ -580,27 +623,14 @@ void SetEnabled(bool enabled)
         const int entered = last ? (int)game::Rd<std::uint32_t>(last + 0x2B94) : 0;
         g_enteredSeen = gamedata::ValidQuestId(entered) ? entered : 0;
         g_enteredQuest.store(0, std::memory_order_release);
-        ::InterlockedExchange(reinterpret_cast<volatile LONG*>(&g_gateEnabled), 1);
-        g_enabled.store(true, std::memory_order_release);
+        g_restartWatchdog.Reset();
+        OpenEntrances();
         return;
     }
-    ::InterlockedExchange(reinterpret_cast<volatile LONG*>(&g_gateEnabled), 0);
-    if (!g_enabled.exchange(false, std::memory_order_acq_rel)) {
-        while (::InterlockedCompareExchange(reinterpret_cast<volatile LONG*>(&g_gateInflight), 0, 0) != 0)
-            ::Sleep(0);
-        RestoreRadial();
-        CancelPending();
-        return;
-    }
-    // 先关闭两个入口闸门，再等待 C++ hook 与三个汇编 call gate 全部退出。
-    // call gate 的 inflight 覆盖比较、restart 写回和跳过决定，所以排空后再清零不会被复活。
-    ::InterlockedExchange(reinterpret_cast<volatile LONG*>(&g.restart), 0);
-    while (g_inflight.load(std::memory_order_acquire) != 0 ||
-           ::InterlockedCompareExchange(reinterpret_cast<volatile LONG*>(&g_gateInflight), 0, 0) != 0)
-        ::Sleep(0);
+    CloseAndDrain();
     // 套道具时临时改过的快捷栏也在发布 Dormant 前恢复，并绑定原存档槽。
     RestoreRadial();
-    CancelPending();
+    ClearPendingAfterDrain();
 }
 
 // 把一套全套里的装备/道具/猫饭/任务排进待办。装备由 ApplyResetAndEquip 钩子在游戏线程里换，
@@ -640,7 +670,8 @@ bool RequestActiveSetEquipApply(const Config& cfg)
 
 void RequestRestart(const Config& cfg)
 {
-    if (!cfg.enabled || !Enabled()) return;
+    ActiveCall call;
+    if (!call || !cfg.enabled) return;
     if (!g_ready) {
         Chat(i18n::Tr("Better-IN-Q：重开功能没装上，详情见 BetterINQ.log",
                       "Better-IN-Q: the restart hook did not install, see BetterINQ.log",
@@ -656,6 +687,7 @@ void RequestRestart(const Config& cfg)
                                      "Better-IN-Q: no loadout #%d in the config",
                                      "Better-IN-Q：設定にセット番号 %d がありません"), cfg.activeSet));
     }
+    g_restartWatchdog.Reset();
     g.restart = 1;
 }
 
@@ -663,7 +695,8 @@ void RequestRestart(const Config& cfg)
 // 不接任务也不出发。不套用全套配置 —— 这一趟只是把任务清掉。
 void RequestResetOnly()
 {
-    if (!Enabled()) return;
+    ActiveCall call;
+    if (!call) return;
     if (!g_ready) {
         Chat(i18n::Tr("Better-IN-Q：重开功能没装上，详情见 BetterINQ.log",
                       "Better-IN-Q: the restart hook did not install, see BetterINQ.log",
@@ -672,6 +705,7 @@ void RequestResetOnly()
     }
     if (g.restart != 0) return;
     g.optResetOnly = 1;
+    g_restartWatchdog.Reset();
     g.restart = 1;
 }
 
@@ -738,11 +772,48 @@ int MigrateLoadoutRefs(Config& cfg)
     return changed;
 }
 
+namespace {
+// Run OUTSIDE Tick's ActiveCall: draining our own inflight token would deadlock.
+// Revalidate after draining: a hook may have advanced/completed the stage, or
+// started loading, between the timeout sample and closing the entrances.
+bool CheckRestartWatchdog(const Config& cfg, std::uint64_t now)
+{
+    const int stage = g.restart;
+    if (!g_restartWatchdog.Step(now, stage, ReadLoading(), cfg.enabled && Enabled()))
+        return false;
+    const bool wasEnabled = Enabled();
+    CloseAndDrain();
+    const bool recover = cfg.enabled && wasEnabled && g.restart == stage &&
+                         ReadLoading() == RestartWatchdog::Loading::Idle;
+    if (recover) {
+        RestoreRadial();
+        ClearPendingAfterDrain();
+        Log("restart watchdog: stage %d stalled for at least 12000 ms; pending work cancelled", stage);
+    } else {
+        g_restartWatchdog.Reset();
+    }
+    // No ApplyOptions / SetEnabled(true): preserve both effective user options
+    // and entered-quest baseline, and do not touch the persistent Config.
+    if (wasEnabled) OpenEntrances();
+    if (recover) Chat(i18n::Tr("Better-IN-Q：重开被游戏挡住了，已安全复位，可以再按一次",
+                              "Better-IN-Q: restart stalled; safely reset, you can try again",
+                              "Better-IN-Q：再開処理が停止したため安全にリセットしました。再試行できます"));
+    return recover;
+}
+} // namespace
+
 // ---------------------------------------------------------------------------
 //  每 100ms（CT 的 Lua 定时器）
 // ---------------------------------------------------------------------------
 void Tick(const Config& cfg)
 {
+    if (CheckRestartWatchdog(cfg, ::GetTickCount64())) return;
+    ActiveCall call;
+    if (!call) return;
+    // Restoration is bound to the saved slot, not today's UI chain. Even when
+    // UiBase/UI disappears this must undo the preceding tick's temporary byte.
+    RestoreRadial();
+    if (!cfg.enabled) return;
     const std::uintptr_t uib = P(pUiBase);
     if (!uib) return;
     const std::uintptr_t pui = P(uib + 0x278);
@@ -750,11 +821,6 @@ void Tick(const Config& cfg)
     const std::uintptr_t pload = P(pui + 0x20);
     const std::uintptr_t piui = P(pui + 0x170);
     const std::uintptr_t slot = SaveSlot();
-
-    // 上一拍为套道具临时改的「联动快捷栏」，这一拍改回原存档槽。只动 1 个字节：
-    // CT 按 4 字节读写这个奇数偏移，会把后面 3 个字节一起覆盖成 0。
-    RestoreRadial();
-    if (!cfg.enabled || !Enabled()) return;
 
     // 道具套装（通过 UI 命令让游戏自己套用）
     if (g_pendingSetItem > 0 && slot && piui) {

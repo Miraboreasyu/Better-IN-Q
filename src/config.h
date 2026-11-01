@@ -124,3 +124,7 @@ bool SaveConfig(const std::wstring& path, const Config& cfg);
 // 当前套用/当前猫饭、猫饭顺序）。读的时候先 base 再 profile，写的时候各自只写自己那段。
 bool LoadSplit(const std::wstring& basePath, const std::wstring& profPath, Config& cfg, std::string& err);
 bool SaveSplit(const std::wstring& basePath, const std::wstring& profPath, const Config& cfg);
+
+// Pure text helpers: no file reads, default creation, migration or persistence.
+bool ParseConfigText(const std::string& text, Config& cfg, std::string& err);
+void SerializeConfigParts(const Config& cfg, std::string& global, std::string& slot);

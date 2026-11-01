@@ -8,10 +8,14 @@ plugin: it is loaded with the game, and `Insert` opens the panel.
 1. Install Stracker's Loader first: `dinput8.dll` and `loader.dll` must be in the game folder.
    Mod managers only copy files; without the loader the plugin is never loaded.
 2. Merge the `nativePC` folder from the archive into the game folder.
-3. Start the game; when you are back at a hub, the chat box shows "Better-IN-Q 0.7.2.1 已就绪".
+3. Start the game; when you are back at a hub, the chat box shows "Better-IN-Q 0.7.3 已就绪".
 
 Uninstall: delete `nativePC\plugins\BetterINQ` (settings live there too).
 Do not run the original IN-Q.exe at the same time.
+
+## Settings backup and restore
+
+Settings offers **Export settings** and **Import settings**. A `.biq` backup includes shared settings and the current local account's loadouts and meals for slots 1–3, without account identity. Exports go to the configuration directory's `backups` folder. Import asks for confirmation and creates a recovery backup before replacing files; it keeps the local account and current slot unchanged. Import clears active selections and does not automatically equip, eat, or accept a quest. Startup-only options still require a game restart.
 
 ## First launch
 
@@ -29,6 +33,8 @@ Do not run the original IN-Q.exe at the same time.
 | Confirm | `A` (Enter or Space) |
 | Back | `B` (Esc) |
 | Enter the sidebar | move left from the content area |
+
+The panel footer shows the actions for the current page or popup and automatically switches to the controller, keyboard or mouse you last used.
 
 The focus starts on "Restart" — press A to restart right away.
 While the panel is open the game receives no keyboard, mouse or gamepad input; the mouse is
@@ -52,8 +58,9 @@ A loadout is equipment set + item set + meal + quest, applied together when rest
 
 | Action | Input |
 | --- | --- |
-| Select / open the editor | `A`, Space, Enter; clicking a row that is not active selects it, clicking the active row edits it |
-| Apply directly | `Y` |
+| Apply / stop applying | Gamepad `A`, Space, Enter or left-click; activate the applied item again to stop applying it |
+| Edit directly | Gamepad or keyboard `Y`, right-click; leaves the active selection unchanged |
+| Reorder directly | Gamepad `LB` / `RB`, keyboard `Ctrl+Up` / `Ctrl+Down` moves the item up / down one position |
 | Rename | `F` or gamepad `X` (up to 50 characters, duplicates allowed) |
 | Reorder | `L3` or `E` enters move mode, up/down swaps, `L3`/`A`/`E` drops, `B` cancels |
 

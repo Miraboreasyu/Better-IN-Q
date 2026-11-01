@@ -1,4 +1,4 @@
-Better-IN-Q v0.7.2.1
+Better-IN-Q v0.7.3
 面板操作说明 / Panel Guide
 =========================
 
@@ -25,6 +25,7 @@ L3 / R3 表示按下左 / 右摇杆。手柄按键名称采用 Xbox 标识。
 · 向左移动到内容边缘后进入左侧栏，上下选择页面，向右返回内容。
 · 鼠标左键：点击操作；鼠标滚轮：滚动列表。
 · 输入框支持中文、英文和日文输入。
+· 面板底部显示当前页面的可用操作，并随最近使用的手柄、键盘或鼠标自动切换；编辑、排序和弹窗中会显示对应提示。
 
 打开面板后，默认选中主页的「重开」，直接按 A 即可重开。
 面板打开时，请在面板内完成操作；关闭后恢复游戏操作。
@@ -34,10 +35,12 @@ L3 / R3 表示按下左 / 右摇杆。手柄按键名称采用 Xbox 标识。
 ----------
 「重开」：按当前选择的任务和重开方式重新开始。
 「只重置任务」：重置并回到据点，不重新接任务，也不出发。
+如果重开流程在同一步停留 12 秒仍未推进（读盘期间不计），插件会取消本次待办并提示已安全复位、可以重试。处理游戏内的拦截提示后可重新按重开，不会自动反复重试。
 
 选择「换任务」，找到任务后确认，即可设为下次重开的任务。
 搜索支持任务 ID、中文 / 英文 / 日文任务名、中文拼音及首字母、日文假名及罗马音。
 例如：heilong、hl、kokuryuu。
+任务列表到顶后再按上，可选中搜索框；确认后输入关键词。
 
 套装指定了任务时，重开优先使用套装中的任务。
 未套用指定任务的套装时，使用任务页当前显示的任务。
@@ -51,10 +54,12 @@ L3 / R3 表示按下左 / 右摇杆。手柄按键名称采用 Xbox 标识。
 · A / 空格 / 回车 / 鼠标左键：套用当前项；对已套用项再操作一次，取消套用。
 · Y / 键盘 Y / 鼠标右键：直接编辑，不改变当前套用选择。
 · X / 键盘 F：修改名称，最多 50 个字符，可以重名。
+· LB / RB 或 Ctrl + ↑ / ↓：将当前项直接上移 / 下移一格；不改变套用选择。
 · L3 / 键盘 E：进入移动模式；用上下方向键、W / S 或 K / J 调整顺序，再按 L3 / 手柄 A / 键盘 E 放下，B 取消。
 
 编辑时，分别选择装备、道具、猫饭和任务；「—」表示不更换该项。
 猫饭选择「跟全局那份」时，使用猫饭页选中的预设。
+聚焦或悬停猫饭选项时，浮窗会预览体力、耐力和三个技能简称。
 「联动快捷栏」用于同时切换所选道具套装关联的快捷栏。
 游戏内修改装备或道具套装名称后，面板列表会自动更新。
 
@@ -65,7 +70,8 @@ L3 / R3 表示按下左 / 右摇杆。手柄按键名称采用 Xbox 标识。
 只想修改内容、不想套用时，编辑后直接返回即可。
 
 取消套用不会把已经穿上的装备换回去。
-编辑页也可取消套用或删除该套装；删除前需要确认。
+编辑页也可取消套用或删除该套装；删除前会弹出确认卡片，默认选中「取消」。
+按 B / Esc 或点击「取消」只关闭卡片；选择红色「删除」并确认才会删除。猫饭删除也使用相同确认方式。
 
 四、猫饭页
 ----------
@@ -76,6 +82,7 @@ L3 / R3 表示按下左 / 右摇杆。手柄按键名称采用 Xbox 标识。
 · A / 空格 / 回车 / 鼠标左键：选用，再操作一次取消。
 · Y / 键盘 Y / 鼠标右键：直接编辑，不改变当前选择。
 · X / 键盘 F：改名。
+· LB / RB 或 Ctrl + ↑ / ↓：将当前项直接上移 / 下移一格；不改变套用选择。
 · L3 / 键盘 E：进入移动模式，用上下方向键、W / S 或 K / J 调整顺序；L3 / 手柄 A / 键盘 E 放下，B 取消。
 
 选中的猫饭预设会在进入任务时使用。
@@ -115,6 +122,12 @@ L3 / R3 表示按下左 / 右摇杆。手柄按键名称采用 Xbox 标识。
 游戏内切换角色存档后，在这里选择对应的 1 / 2 / 3。
 套装和猫饭按存档位分别保存；语言、快捷键等面板设置不随存档位切换。
 
+设置备份与恢复：
+点击「导出设置」把全局设置和当前本机账号的 1 / 2 / 3 存档位套装、猫饭保存为一个 .biq 文件，位于插件配置目录的 backups 文件夹。
+备份不含 Steam 账号信息，也不会更改本机账号绑定和当前存档位。
+点击「导入设置」选中 .biq 文件，确认后覆盖全局设置及三个存档位；覆盖前自动备份原设置，备份失败则不会导入。
+导入不会立即换装、吃猫饭或接任务；当前套用选择会清空，请到对应页面重新选择。部分启动时生效的设置仍需重启游戏。
+
 从原版 IN-Q 导入：
 点击「选择 config.txt…」，找到原版 IN-Q 的 config.txt 并选中。
 可以用「上一级」或盘符按钮寻找文件。
@@ -149,6 +162,7 @@ Inside the panel:
 · Move left past the content edge to enter the sidebar. Move up or down to choose a page, then right to return to its content.
 · Left mouse button: click to interact. Mouse wheel: scroll lists.
 · Text fields support Chinese, English and Japanese input.
+· The panel footer shows the actions available in the current context and automatically switches to the controller, keyboard or mouse you last used. Editing, sorting and popups have their own hints.
 
 The panel opens with Restart selected on the home page. Press A to restart immediately.
 While the panel is open, use its controls. Close it to resume normal game controls.
@@ -158,10 +172,12 @@ Settings and edits are saved automatically, except for actions that ask for conf
 -------------
 Restart: restart using the selected quest and restart mode.
 Reset quest only: reset and return to base without accepting another quest or departing.
+If a restart stays at the same step for 12 seconds without progress (loading time excluded), the plugin cancels its pending work and asks you to retry. Dismiss any blocking in-game prompt, then restart again; it does not retry automatically.
 
 Choose Quests, find a quest, and confirm it to use it for the next restart.
 Search accepts quest IDs, Chinese / English / Japanese names, Chinese pinyin and initials, and Japanese kana and romaji.
 Examples: heilong, hl, kokuryuu.
+At the top of the quest list, press Up again to focus the search box, then confirm to type.
 
 If the active loadout specifies a quest, that quest takes priority on restart.
 Otherwise, the quest currently shown on the Quest page is used.
@@ -175,10 +191,12 @@ List controls:
 · A / Space / Enter / left-click: apply the item. Activate the applied item again to stop applying it.
 · Y / keyboard Y / right-click: edit directly without changing the active selection.
 · X / keyboard F: rename, up to 50 characters. Duplicate names are allowed.
+· LB / RB or Ctrl + Up / Down: move the focused item up / down one position without changing the active selection.
 · L3 / keyboard E: enter reorder mode. Use up/down arrows, W / S or K / J to reorder, then press L3 / controller A / keyboard E to place the item, or B to cancel.
 
 In the editor, select the equipment, items, meal and quest. “—” leaves that item unchanged.
 Choose “the global meal” to use the preset selected on the Meals page.
+Focus or hover a meal option to preview health, stamina and the three abbreviated skills in a small floating panel.
 Link shortcut bar also switches to the shortcut bar associated with the selected item loadout.
 Equipment and item loadout names update automatically after you rename them in the game.
 
@@ -189,7 +207,8 @@ The editor's OK / apply button applies that loadout and returns to the list.
 To edit without applying, make your changes and go back instead.
 
 Stopping a loadout does not restore your previous equipment.
-You can also stop applying or delete a loadout from its editor. Deletion requires confirmation.
+You can also stop applying or delete a loadout from its editor. A confirmation card defaults to Cancel.
+B / Esc or Cancel only closes the card; select and confirm the red Delete button to delete. Meals use the same confirmation.
 
 4. Meals page
 -------------
@@ -200,6 +219,7 @@ List controls are the same as on the Loadouts page:
 · A / Space / Enter / left-click: select a preset; activate it again to clear the selection.
 · Y / keyboard Y / right-click: edit directly without changing the selection.
 · X / keyboard F: rename.
+· LB / RB or Ctrl + Up / Down: move the focused item up / down one position without changing the active selection.
 · L3 / keyboard E: enter reorder mode. Use up/down arrows, W / S or K / J to reorder; L3 / controller A / keyboard E to place, B to cancel.
 
 The selected meal preset is used when entering a quest.
@@ -238,6 +258,12 @@ Changing hotkeys:
 Save slot:
 After switching character saves in the game, select the matching slot: 1, 2 or 3.
 Loadouts and meals are saved separately for each slot. Panel settings such as language and hotkeys stay the same.
+
+Settings backup and restore:
+Export settings saves shared settings and loadouts/meals for all three slots of the current local account into one .biq file in the configuration directory's backups folder.
+The backup contains no Steam account identity and does not change your local account binding or selected slot.
+Import settings opens a file picker and asks before replacing shared settings and all three slots. A recovery backup is created first; import is aborted if backup fails.
+Import does not immediately equip items, eat a meal, or accept a quest. Active selections are cleared; select them again on the relevant page. Startup-only options still require restarting the game.
 
 Import from the original IN-Q:
 Click Choose config.txt… and select config.txt from your original IN-Q folder.

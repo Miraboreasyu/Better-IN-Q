@@ -23,6 +23,7 @@
 #include "i18n.h"
 #include "inqimport.h"
 #include "profile.h"
+#include "settings_transfer.h"
 #include "hook.h"
 #include "inq.h"
 #include "runtime_state.h"
@@ -43,7 +44,7 @@ volatile LONG g_teardown = 0;   // 窗口已销毁/进程在退出，这时候�
 // 窗口已经没了、我们正在收尾：异常处理器从此一律不碰（见 OnCrash）。
 std::atomic<bool> g_exiting{false};
 std::atomic<long> g_inCrash{0};
-const char* const kVersion = "0.7.2.1";
+const char* const kVersion = "0.7.3";
 
 // 主循环线程和游戏渲染线程（画面板）共用，都要先拿这把锁
 std::mutex g_mx;
@@ -264,6 +265,7 @@ DWORD WINAPI Worker(LPVOID)
         g_model.cfg = &g_cfg;
         g_model.version = kVersion;
         g_model.slot = profile::Slot();   // 设置页里那排 1/2/3 的当前值
+        g_model.backupsDir = dir + L"backups\\";
         autoSrc = inqimport::Resolve("", basePath);   // 旁边有就顺手带上
         if (!autoSrc.empty()) Log("import: 旁边有原版 config.txt：%s", inqimport::Narrow(autoSrc).c_str());
         hk.Parse(g_cfg);
@@ -451,6 +453,59 @@ DWORD WINAPI Worker(LPVOID)
         {
             std::lock_guard<std::mutex> lk(g_mx);
             ui::Model& m = g_model;
+
+            if (m.reqExportSettings) {
+                m.reqExportSettings = false;
+                std::string error;
+                const bool directoryReady = ::CreateDirectoryW(m.backupsDir.c_str(), nullptr) ||
+                                            ::GetLastError() == ERROR_ALREADY_EXISTS;
+                SYSTEMTIME time{};
+                ::GetLocalTime(&time);
+                wchar_t name[96]{};
+                ::swprintf_s(name, L"BetterINQ-%04u%02u%02u-%02u%02u%02u-%03u-%llu.biq",
+                             time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute,
+                             time.wSecond, time.wMilliseconds, (unsigned long long)::GetTickCount64());
+                const std::wstring destination = m.backupsDir + name;
+                if (directoryReady && settings_transfer::ExportFile(settings_transfer::CurrentStorage(), g_cfg, destination, error))
+                    Chat(i18n::Fmt(i18n::Tr("Better-IN-Q：设置已导出：%s", "Better-IN-Q: settings exported: %s",
+                                           "Better-IN-Q：設定を書き出しました：%s"), inqimport::Narrow(destination).c_str()));
+                else {
+                    if (!directoryReady) error = "cannot create backups directory";
+                    Chat(i18n::Fmt(i18n::Tr("Better-IN-Q：导出失败：%s", "Better-IN-Q: export failed: %s",
+                                           "Better-IN-Q：書き出し失敗：%s"), error.c_str()));
+                }
+            }
+            if (m.reqImportSettings) {
+                m.reqImportSettings = false;
+                const std::wstring source = m.settingsPath;
+                m.settingsPath.clear();
+                // Stop writers before replacing IDs/configuration. Never replay old UI requests
+                // against the imported IDs, even if import fails after cancelling pending work.
+                inq::SetEnabled(false);
+                m.reqRestart = m.reqResetOnly = m.reqApplyEquip = false;
+                m.reqSlot = m.reqImportInq = false;
+                m.slot = profile::Slot();
+                std::wstring backup;
+                std::string error;
+                if (settings_transfer::ImportFile(settings_transfer::CurrentStorage(), source, m.backupsDir, g_cfg, backup, error)) {
+                    m.reqSave = false;
+                    dirtyAt = 0;
+                    i18n::Set(i18n::FromString(g_cfg.language));
+                    hdr::Configure(g_cfg.hdr, g_cfg.sdrNits);
+                    hk.Parse(g_cfg);
+                    m.reqResetView = true; // renderer clears editor/capture state under its own ImGui context
+                    migrated = false;
+                    migrateTries = 0;
+                    g_refreshNames = true;
+                    Chat(i18n::Fmt(i18n::Tr("Better-IN-Q：设置已导入；原设置备份：%s",
+                                           "Better-IN-Q: settings imported; previous settings backed up: %s",
+                                           "Better-IN-Q：設定を取り込みました。元の設定のバックアップ：%s"), inqimport::Narrow(backup).c_str()));
+                } else {
+                    Chat(i18n::Fmt(i18n::Tr("Better-IN-Q：设置导入失败：%s", "Better-IN-Q: settings import failed: %s",
+                                           "Better-IN-Q：設定取り込み失敗：%s"), error.c_str()));
+                }
+                inq::ApplyOptions(g_cfg);
+            }
 
             // UI 在渲染线程先改 Config、再提 reqSave；必须先发布状态过渡，避免同一帧关掉功能又执行旧请求。
             const runtime::Mode wantedMode = g_cfg.enabled ? runtime::Mode::Active : runtime::Mode::Dormant;

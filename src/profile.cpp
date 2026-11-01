@@ -295,6 +295,11 @@ std::wstring BasePath()
     return g_dir + L"BetterINQ.ini";
 }
 
+std::wstring PathForSlot(int slot)
+{
+    return slot >= 1 && slot <= 3 ? SlotFile(slot) : std::wstring();
+}
+
 std::wstring ConfigPath()
 {
     (void)Slot();   // 顺带初始化账号，路径里要用

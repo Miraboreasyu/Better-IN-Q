@@ -529,6 +529,11 @@ bool SaveSplitImpl(const std::wstring& basePath, const std::wstring& profPath,
 }
 }  // namespace
 
+void SerializeConfigParts(const Config& cfg, std::string& global, std::string& slot)
+{
+    SplitText(Render(cfg), global, slot);
+}
+
 bool SaveSplit(const std::wstring& basePath, const std::wstring& profPath, const Config& cfg)
 {
     return SaveSplitImpl(basePath, profPath, cfg, false);
@@ -568,6 +573,14 @@ bool LoadConfig(const std::wstring& path, Config& cfg, std::string& err)
                                                   "cannot read or create the config file",
                                                   "設定ファイルを読めず、作成もできません"); return false; }
     }
+    return ParseConfigText(txt, cfg, err);
+}
+
+bool ParseConfigText(const std::string& text, Config& cfg, std::string& err)
+{
+    (void)err;
+    std::string txt = text;
+    if (txt.compare(0, 3, "\xEF\xBB\xBF") == 0) txt.erase(0, 3);
     cfg = Config();
     std::string sec;
     LoadoutSet* curSet = nullptr;

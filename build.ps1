@@ -88,7 +88,7 @@ if ($What -eq "dll" -or $What -eq "all") {
     Build-ImGui
     $srcs = @("main", "inq", "hook", "config", "input", "log",
               "ui", "gamedata", "overlay", "padfilter", "cursorfilter", "kbdfilter", "dinfilter",
-              "hdr", "inqimport", "profile", "hangdump",
+              "hdr", "inqimport", "profile", "hangdump", "settings_transfer",
               "i18n") |
             ForEach-Object { Join-Path $Src "$_.cpp" }
     Compile ($Common + @("/LD", "/I$IM", "/Isrc", "/Fe$Out\BetterINQ.dll", "/Fo$Obj\") +
@@ -189,9 +189,20 @@ if ($What -eq "test" -or $What -eq "all") {
     Compile ($Common + @("/Fo$Obj\", "/I$IM", "/Isrc", "/Fe$Out\panel_gamepad_gate_test.exe",
         "$Tests\panel_gamepad_gate_test.cpp") + $ImGuiCore + @("/link") + $WinLibs)
 
+    Compile ($Common + @("/Fo$Obj\", "/Isrc", "/Fe$Out\restart_watchdog_test.exe",
+        "$Tests\restart_watchdog_test.cpp") + @("/link"))
+
+    Compile ($Common + @("/Fo$Obj\", "/Isrc", "/Fe$Out\inq_restart_watchdog_test.exe",
+        "$Tests\inq_restart_watchdog_test.cpp", "$Src\config.cpp", "$Src\gamedata.cpp", "$Src\i18n.cpp", "$Src\hook.cpp") +
+        @("/link") + $WinLibs)
+
+    Compile ($Common + @("/Fo$Obj\", "/Isrc", "/Fe$Out\settings_transfer_test.exe",
+        "$Tests\settings_transfer_test.cpp", "$Src\settings_transfer.cpp", "$Src\config.cpp", "$Src\profile.cpp", "$Src\gamedata.cpp", "$Src\i18n.cpp", "$Src\log.cpp") +
+        @("/link") + $WinLibs)
+
     $fail = 0
     foreach ($t in @("hook_test", "gamedata_test", "config_test", "cursor_test", "kbdfilter_test", "hdr_test", "profile_test", "inqimport_test",
-                     "dinfilter_test", "ui_nav_test", "window_chain_test", "ime_test", "runtime_state_test", "inq_equip_apply_test", "panel_gamepad_gate_test")) {
+                     "dinfilter_test", "ui_nav_test", "window_chain_test", "ime_test", "runtime_state_test", "restart_watchdog_test", "inq_restart_watchdog_test", "inq_equip_apply_test", "panel_gamepad_gate_test", "settings_transfer_test")) {
         Write-Host "  run $t.exe"
         & (Join-Path $Out "$t.exe")
         if ($LASTEXITCODE -ne 0) { $fail = $fail + 1 }

@@ -37,6 +37,9 @@ void SetSlot(int slot);
 
 // 当前档案的 ini 路径（目录不存在会建）：只放套装和猫饭
 std::wstring ConfigPath();
+// Resolve only: never creates files/directories or changes selected slot; invalid slot => empty.
+// Unknown identity uses only the existing default_N.ini namespace, never another account.
+std::wstring PathForSlot(int slot);
 
 // 所有存档共用的那份：<插件目录>\BetterINQ.ini（面板设置、快捷键、语言、HDR…）
 std::wstring BasePath();

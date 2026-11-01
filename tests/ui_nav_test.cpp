@@ -3,6 +3,7 @@
 #include <d3d11.h>
 #include <cstdio>
 #include <cmath>
+#include <cfloat>
 #include <cstring>
 #include <algorithm>
 #include <vector>
@@ -25,6 +26,11 @@ std::string DebugFoodSkillsSummary(const FoodPreset& f);
 void DebugFocusHotkey(bool pad);
 void DebugFocusSearch();
 std::string DebugSearch();
+void DebugFocusSettingsTransfer(bool importing);
+ImVec2 DebugSettingsExportCenter();
+void DebugFocusPickEntry(const wchar_t* name);
+std::vector<std::wstring> DebugPickEntries();
+bool DebugSettingsConfirm();
 }
 
 static int g_fail = 0;
@@ -67,6 +73,208 @@ static void Press(ImGuiKey k)
     ImGui::GetIO().AddKeyEvent(k, false);
     Frame();
     Frame();
+}
+
+// Real filesystem enumeration and actual button/navigation events. Transfer IO is
+// deliberately owned by main: the UI may only emit the two explicit requests.
+static void TestSettingsTransfer()
+{
+    wchar_t temp[MAX_PATH] = {}, unique[MAX_PATH] = {};
+    GetTempPathW(MAX_PATH, temp);
+    GetTempFileNameW(temp, L"biq", 0, unique);
+    DeleteFileW(unique);
+    CHECK(CreateDirectoryW(unique, nullptr) != FALSE, "settings picker fixture directory created");
+    const std::wstring dir = unique;
+    const wchar_t* files[] = {L"backup.BIQ", L"legacy.bin", L"config.txt", L"ignore.exe"};
+    for (const auto* name : files) {
+        HANDLE f = CreateFileW((dir + L"\\" + name).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+        CHECK(f != INVALID_HANDLE_VALUE, "settings picker real file fixture created");
+        if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
+    }
+    const std::wstring oldDir = m.backupsDir;
+    m.backupsDir = dir;
+    const int oldLanguage = i18n::Current();
+    auto settle = [] { for (int n = 0; n < 5; ++n) Frame(); };
+    auto focus = [&](bool importing) { ui::DebugFocusSettingsTransfer(importing); Frame(); settle(); };
+    auto open = [&] {
+        ui::OnOpen(m); ui::DebugGo(6, 0); settle();
+        m.reqClose = m.reqSave = m.reqApplyEquip = m.reqRestart = m.reqResetOnly = false;
+        m.reqExportSettings = m.reqImportSettings = m.reqImportInq = false;
+        m.settingsPath.clear();
+    };
+    auto pick = [&](ImGuiKey activate) {
+        focus(true); Press(activate); settle();
+        const auto entries = ui::DebugPickEntries();
+        CHECK(std::find(entries.begin(), entries.end(), L"backup.BIQ") != entries.end() &&
+              std::find(entries.begin(), entries.end(), L"legacy.bin") != entries.end() &&
+              std::find(entries.begin(), entries.end(), L"config.txt") == entries.end() &&
+              std::find(entries.begin(), entries.end(), L"ignore.exe") == entries.end(),
+              "backup picker enumerates real .BIQ/.bin only");
+        ui::DebugFocusPickEntry(L"backup.BIQ"); Frame(); settle(); Press(activate); settle();
+        CHECK(ui::DebugSettingsConfirm() && !m.reqImportSettings && m.settingsPath.empty(),
+              "selecting a backup stages confirmation without IO request");
+    };
+    for (int language = 0; language < 3; ++language) {
+        i18n::Set((i18n::Lang)language); open(); focus(false); Press(ImGuiKey_GamepadFaceDown);
+        CHECK(m.reqExportSettings && !m.reqImportSettings && !m.reqSave && !m.reqApplyEquip,
+              "export emits only one-shot main request language=%d", language);
+        m.reqExportSettings = false;
+        pick(ImGuiKey_GamepadFaceDown);
+        CHECK(ui::DebugHintText().find(language == 0 ? "覆盖" : language == 1 ? "Replace" : "上書き") != std::string::npos,
+              "confirmation footer is context specific language=%d", language);
+        Press(ImGuiKey_GamepadFaceDown); // Safe default is Cancel, not Import.
+        CHECK(!ui::DebugSettingsConfirm() && !m.reqImportSettings && !m.reqClose && ui::DebugPage() == 6,
+              "default A cancels without request or panel-back language=%d", language);
+        pick(ImGuiKey_GamepadFaceDown); Press(ImGuiKey_GamepadFaceRight);
+        CHECK(!ui::DebugSettingsConfirm() && !m.reqImportSettings && !m.reqClose && ui::DebugPage() == 6,
+              "B cancels confirmation without leaking to underlying page language=%d", language);
+        pick(ImGuiKey_GamepadFaceDown); Press(ImGuiKey_GamepadDpadRight); Press(ImGuiKey_GamepadFaceDown);
+        CHECK(m.reqImportSettings && m.settingsPath == dir + L"\\backup.BIQ" &&
+              !m.reqImportInq && !m.reqApplyEquip && !m.reqRestart && !m.reqResetOnly,
+              "only explicit confirm emits exact path and no apply/restart language=%d", language);
+        m.reqImportSettings = false; m.settingsPath.clear();
+        open(); focus(true); Press(ImGuiKey_Enter); settle(); Press(ImGuiKey_Escape);
+        CHECK(!m.reqImportSettings && m.settingsPath.empty() && !m.reqClose && ui::DebugPage() == 6,
+              "keyboard picker Esc cancels without a transfer request language=%d", language);
+    }
+    open(); focus(false);
+    // NavRectRel may retain the pre-scroll scoring rectangle. Hit-test the
+    // actual rendered item after scrolling, never a stale navigation proxy.
+    const ImVec2 exportCenter = ui::DebugSettingsExportCenter();
+    ImGui::GetIO().AddMousePosEvent(exportCenter.x, exportCenter.y); Frame();
+    ImGui::GetIO().AddMouseButtonEvent(0, true); Frame();
+    ImGui::GetIO().AddMouseButtonEvent(0, false); Frame(); settle();
+    CHECK(m.reqExportSettings && !m.reqImportSettings && ui::DebugHintSource() == 2,
+          "mouse export click emits main request and uses mouse footer");
+    ImGui::GetIO().AddMousePosEvent(-FLT_MAX, -FLT_MAX); Frame();
+    open(); pick(ImGuiKey_Enter); Press(ImGuiKey_Escape);
+    CHECK(!ui::DebugSettingsConfirm() && !m.reqImportSettings && !m.reqClose,
+          "keyboard confirmation Esc cancels only modal");
+    // The original picker is still txt-only and cannot emit a backup request.
+    ui::DebugOpenPick(); settle();
+    const auto legacy = ui::DebugPickEntries();
+    CHECK(!m.reqImportSettings && !ui::DebugSettingsConfirm(), "original IN-Q picker remains a separate import mode");
+    Press(ImGuiKey_Escape);
+    ui::OnOpen(m); settle();
+    for (const auto* name : files) DeleteFileW((dir + L"\\" + name).c_str());
+    RemoveDirectoryW(dir.c_str());
+    m.backupsDir = oldDir;
+    i18n::Set((i18n::Lang)oldLanguage);
+}
+
+// Real AddKeyEvent input, including NewFrame's native Ctrl+arrow navigation.
+static void TestDirectReorder()
+{
+    Config* original = m.cfg;
+    Config c;
+    for (int id = 1; id <= 18; ++id) {
+        LoadoutSet s; s.id = id * 3; s.name = "same"; s.food = id;
+        c.sets.push_back(s); c.foods[id] = FoodPreset(); c.foodOrder.push_back(id);
+    }
+    c.activeSet = c.sets.front().id; c.food = 1;
+    const Config baseline = c;
+    m.cfg = &c;
+    ImGuiIO& io = ImGui::GetIO();
+    auto open = [&](int page) {
+        ui::OnOpen(m); ui::DebugGo(page, 0);
+        for (int n = 0; n < 6; ++n) Frame();
+        m.reqSave = m.reqApplyEquip = false;
+    };
+    auto order = [&](int page) {
+        std::vector<int> r;
+        if (page == 2) for (const auto& s : c.sets) r.push_back(s.id);
+        else r = ui::FoodRowIds(c);
+        return r;
+    };
+    auto chord = [&](ImGuiKey key) {
+        io.AddKeyEvent(ImGuiMod_Ctrl, true); io.AddKeyEvent(key, true); Frame();
+        io.AddKeyEvent(key, false); io.AddKeyEvent(ImGuiMod_Ctrl, false); Frame(); Frame();
+    };
+    for (int page : {2, 4}) {
+        c = baseline; open(page);
+        const auto initial = order(page);
+        const ImGuiID focused = GImGui->NavId;
+        Press(ImGuiKey_GamepadR1);
+        auto expected = initial; std::swap(expected[0], expected[1]);
+        CHECK(order(page) == expected && GImGui->NavId == focused && m.reqSave && !m.reqApplyEquip,
+              "direct RB moves one row, stable focus/save only page=%d", page);
+        chord(ImGuiKey_UpArrow);
+        CHECK(order(page) == initial && GImGui->NavId == focused,
+              "Ctrl+Up sorts without also navigating page=%d", page);
+        m.reqSave = false;
+        chord(ImGuiKey_UpArrow); Press(ImGuiKey_GamepadL1);
+        CHECK(order(page) == initial && GImGui->NavId == focused && !m.reqSave,
+              "top edge no save or focus drift page=%d", page);
+        chord(ImGuiKey_DownArrow);
+        CHECK(order(page) == expected && GImGui->NavId == focused,
+              "Ctrl+Down moves same stable row page=%d", page);
+        io.AddKeyEvent(ImGuiKey_GamepadR1, true);
+        for (int n = 0; n < 150; ++n) Frame();
+        io.AddKeyEvent(ImGuiKey_GamepadR1, false); Frame(); Frame();
+        CHECK(order(page).back() == initial.front() && GImGui->NavId == focused && ui::DebugListScroll() > 0,
+              "held RB repeats to bottom with focus and scrolling page=%d", page);
+        const auto bottom = order(page); m.reqSave = false;
+        chord(ImGuiKey_DownArrow); Press(ImGuiKey_GamepadR1);
+        CHECK(order(page) == bottom && GImGui->NavId == focused && !m.reqSave,
+              "bottom edge never navigates to New button page=%d", page);
+        CHECK(c.activeSet == baseline.activeSet && c.food == baseline.food &&
+              c.FindSetById(baseline.activeSet)->food == 1,
+              "reorder retains active stable ID and meal references page=%d", page);
+        Press(ImGuiKey_E); const auto moving = order(page);
+        Press(ImGuiKey_GamepadL1); Press(ImGuiKey_GamepadR1);
+        CHECK(ui::DebugMoveActive() && order(page) == moving,
+              "LB/RB disabled during E move mode page=%d", page);
+        chord(ImGuiKey_UpArrow);
+        auto movedOnce = moving; std::swap(movedOnce[movedOnce.size()-1], movedOnce[movedOnce.size()-2]);
+        CHECK(order(page) == movedOnce && ui::DebugMoveActive(),
+              "move mode Ctrl+Up moves only once, not a second shortcut page=%d", page);
+        Press(ImGuiKey_Escape);
+        c = baseline; open(page);
+        io.AddKeyEvent(ImGuiMod_Ctrl, true); io.AddKeyEvent(ImGuiKey_DownArrow, true);
+        for (int n = 0; n < 150; ++n) Frame();
+        io.AddKeyEvent(ImGuiKey_DownArrow, false); io.AddKeyEvent(ImGuiMod_Ctrl, false); Frame(); Frame();
+        CHECK(order(page).back() == initial.front() && GImGui->NavId == focused,
+              "held Ctrl+Down repeats sorting only to bottom page=%d", page);
+        c = baseline; open(page); Press(ImGuiKey_F); const auto renamed = order(page);
+        chord(ImGuiKey_DownArrow); Press(ImGuiKey_GamepadR1);
+        CHECK(order(page) == renamed, "rename popup cannot reorder page=%d", page);
+        io.AddKeyEvent(ImGuiKey_GamepadR1, true); Frame();
+        Press(ImGuiKey_Escape);
+        for (int n = 0; n < 45; ++n) Frame();
+        CHECK(order(page) == renamed, "popup held shoulder cannot leak repeat on close page=%d", page);
+        io.AddKeyEvent(ImGuiKey_GamepadR1, false); Frame(); Frame();
+        open(page);
+        CHECK(!ui::DebugMoveActive() && order(page) == initial,
+              "close/reopen clears reorder state page=%d", page);
+        // Existing plain arrows, letters, edit and apply still operate on the row.
+        Press(ImGuiKey_S); const ImGuiID second = GImGui->NavId;
+        Press(ImGuiKey_W);
+        CHECK(GImGui->NavId != second && order(page) == initial,
+              "W/S navigation does not reorder page=%d", page);
+        Press(ImGuiKey_Y);
+        CHECK(ui::DebugPage() == page + 1, "Y editing survives direct reorder page=%d", page);
+    }
+    c = baseline; c.foodOrder = {1, 1, 999, 2}; open(4);
+    const auto canonical = ui::FoodRowIds(c);
+    Press(ImGuiKey_GamepadR1);
+    auto normalized = canonical; std::swap(normalized[0], normalized[1]);
+    CHECK(c.foodOrder == normalized && c.foods.size() == baseline.foods.size(),
+          "meal reorder persists canonical display order without duplicate/missing IDs");
+    wchar_t tempDir[MAX_PATH] = {}, tempFile[MAX_PATH] = {};
+    GetTempPathW(MAX_PATH, tempDir); GetTempFileNameW(tempDir, L"inq", 0, tempFile);
+    Config restored; std::string loadError;
+    const bool roundTrip = SaveConfig(tempFile, c) && LoadConfig(tempFile, restored, loadError);
+    CHECK(roundTrip && restored.foodOrder == normalized && restored.activeSet == c.activeSet &&
+          restored.FindSetById(c.activeSet) && restored.FindSetById(c.activeSet)->food == 1,
+          "actual config save/load preserves reordered foodOrder and stable references");
+    DeleteFileW(tempFile);
+    open(6); ui::DebugStartCapture(m, 0, false);
+    const auto captureOrder = c.foodOrder;
+    chord(ImGuiKey_DownArrow); Press(ImGuiKey_GamepadR1);
+    CHECK(c.foodOrder == captureOrder, "hotkey capture never reorders lists");
+    Press(ImGuiKey_Escape); ui::OnOpen(m);
+    m.cfg = original;
+    for (int n = 0; n < 4; ++n) Frame();
 }
 
 static const char* PageName(int p)
@@ -448,6 +656,613 @@ static void TestSetSummary()
     i18n::Set(before);
 }
 
+
+// Real ImGui IO: cancellation, keyboard/gamepad, mouse, localization and references.
+static void TestDeleteModal()
+{
+    Config* original = m.cfg;
+    const auto lang = i18n::Current();
+    const ImVec2 display = ImGui::GetIO().DisplaySize;
+    const ImVec4 dim = ImGui::GetStyle().Colors[ImGuiCol_ModalWindowDimBg];
+    Config c;
+    LoadoutSet set; set.id = 41; set.name = "Delete me"; set.food = 19;
+    c.sets.push_back(set); c.activeSet = 41; c.food = 19;
+    c.foods[19] = FoodPreset(); c.foods[19].name = "Referenced meal";
+    c.foodOrder = {19}; m.cfg = &c;
+    auto settle = [&] { for (int n = 0; n < 6; ++n) Frame(); };
+    auto edit = [&](int page) {
+        ui::OnOpen(m); ui::DebugGo(page, page == 3 ? 0 : 19); settle();
+        m.reqSave = m.reqApplyEquip = m.reqClose = false;
+    };
+    auto popup = [&]() -> ImGuiWindow* {
+        for (auto* w : GImGui->Windows)
+            if (w->Active && (w->Flags & ImGuiWindowFlags_Modal) && std::strstr(w->Name, "confirm_del")) return w;
+        return nullptr;
+    };
+    auto open = [&] { ui::DebugOpenDelete(); settle(); CHECK(popup(), "delete modal opens"); };
+    auto click = [&](bool confirm) {
+        auto* w = popup(); if (!w) return;
+        const float scale = ImGui::GetIO().DisplaySize.y / 1080.0f;
+        ImGuiIO& io = ImGui::GetIO();
+        io.AddMousePosEvent(w->Pos.x + w->Size.x * (confirm ? 0.72f : 0.28f),
+                            w->Pos.y + w->Size.y - w->WindowPadding.y - 22 * scale);
+        Frame(); io.AddMouseButtonEvent(0, true); Frame(); io.AddMouseButtonEvent(0, false); settle();
+        io.AddMousePosEvent(-100, -100); Frame();
+    };
+    edit(3);
+    // Activate the real page button with A, not the debug hook.
+    for (auto* w : GImGui->Windows) if (w->Active && std::strstr(w->Name, "##content")) {
+        ImGui::SetFocusID(w->GetID("##del"), w); ImGui::SetNavCursorVisible(true); break;
+    }
+    Press(ImGuiKey_GamepadFaceDown);
+    CHECK(popup() && c.sets.size() == 1, "real A opens card without same-input cancellation/deletion");
+    Press(ImGuiKey_GamepadFaceDown);
+    CHECK(!popup() && c.sets.size() == 1 && ui::DebugPage() == 3 && !m.reqSave, "default A cancels without saving");
+    for (auto key : {ImGuiKey_GamepadFaceRight, ImGuiKey_Escape}) {
+        open(); Press(key);
+        CHECK(!popup() && ui::DebugPage() == 3 && !m.reqClose && !m.reqSave, "B/Esc closes modal only key=%d", key);
+    }
+    open(); click(false);
+    CHECK(!popup() && c.sets.size() == 1 && !m.reqSave, "mouse cancel preserves data");
+    open(); Press(ImGuiKey_GamepadDpadRight);
+    auto& io = ImGui::GetIO();
+    io.AddKeyEvent(ImGuiKey_GamepadFaceDown, true); io.AddKeyEvent(ImGuiKey_Escape, true); Frame();
+    io.AddKeyEvent(ImGuiKey_GamepadFaceDown, false); io.AddKeyEvent(ImGuiKey_Escape, false); settle();
+    CHECK(!popup() && c.sets.size() == 1 && !m.reqSave, "cancel wins over simultaneous delete activation");
+    // Pending test-only requests must not survive reopening the panel.
+    ui::DebugOpenDelete(); edit(3);
+    CHECK(!popup(), "OnOpen clears stale DebugOpenDelete request");
+    for (int height : {1080, 720}) {
+        io.DisplaySize = ImVec2(height * 16.0f / 9.0f, (float)height); ui::Init(height / 1080.0f);
+        for (auto language : {i18n::kZh, i18n::kEn, i18n::kJa}) {
+            i18n::Set(language);
+            c.sets[0].name.clear();
+            const char* ch = language == i18n::kZh ? "长" : language == i18n::kJa ? "あ" : "W";
+            for (int i = 0; i < 50; ++i) c.sets[0].name += ch;
+            edit(3); open();
+            auto* w = popup();
+            CHECK(w && w->Pos.x >= 0 && w->Pos.y >= 0 && w->Pos.x + w->Size.x <= io.DisplaySize.x &&
+                  w->Pos.y + w->Size.y <= io.DisplaySize.y && w->ScrollMax.x == 0 && w->ScrollMax.y == 0,
+                  "50-character localized title wraps without clipping %dp lang=%d", height, language);
+            CHECK(w && w->Size.y > 250 * height / 1080.0f && GImGui->NavId == w->GetID("##no"),
+                  "wrapped modal keeps cancel focused %dp lang=%d", height, language);
+            Press(ImGuiKey_Escape);
+        }
+    }
+    io.DisplaySize = display; ui::Init(1.0f); i18n::Set(lang);
+    edit(5); open(); click(true);
+    CHECK(c.foods[19].deleted && c.food == 19 && c.sets[0].food == 19 && c.activeSet == 41 &&
+          ui::FoodRowIds(c) == std::vector<int>({19}) && m.reqSave && !m.reqApplyEquip && ui::DebugPage() == 4,
+          "mouse delete meal retains referenced tombstone/stable IDs and saves");
+    edit(3); open(); Press(ImGuiKey_GamepadDpadRight); Press(ImGuiKey_GamepadFaceDown);
+    CHECK(c.sets.empty() && c.activeSet == -1 && c.food == 19 && c.foods[19].deleted &&
+          m.reqSave && m.reqApplyEquip && ui::DebugPage() == 2,
+          "right then A deletes active set, clears active reference and requests equip update");
+    CHECK(std::memcmp(&dim, &ImGui::GetStyle().Colors[ImGuiCol_ModalWindowDimBg], sizeof(dim)) == 0,
+          "delete style leaves global modal dim unchanged");
+    m.cfg = original; ui::OnOpen(m); settle();
+}
+
+static void CheckListHintControls()
+{
+    const int source = ui::DebugHintSource();
+    const char* rename = i18n::Tr("改名", "Rename", "改名");
+    bool hasRename = false, secondaryCorrect = true;
+    for (const auto& item : ui::DebugHintItems()) {
+        hasRename |= item.find(std::string(source == 0 ? "X " : "F ") + rename) != std::string::npos;
+        if (item.find("LB/RB") != std::string::npos)
+            secondaryCorrect &= source == 0 && (item.find("Shift") != std::string::npos || item.find("换位") != std::string::npos || item.find("並替") != std::string::npos);
+        if (item.find("L3 ") != std::string::npos)
+            secondaryCorrect &= source == 0 && (item.find("Move") != std::string::npos || item.find("移动") != std::string::npos || item.find("移動") != std::string::npos);
+    }
+    CHECK((source == 2 || hasRename) && secondaryCorrect,
+          "focused list retains real rename; optional shift/move controls stay truthful source=%d lang=%d page=%d",
+          source, (int)i18n::Current(), ui::DebugPage());
+}
+
+// Validate the reserved strip itself, not a generous fraction of screen height:
+// 110*S used to pass that check while wasting several lines on every page.
+static void CheckCompactFooter(const char* context)
+{
+    const float height = ImGui::GetIO().DisplaySize.y;
+    const float requestedScale = height / 1080.0f;
+    const float scale = requestedScale < 0.7f ? 0.7f : (requestedScale > 2.5f ? 2.5f : requestedScale);
+    CHECK(ui::DebugHintHeight() > 0 && ui::DebugHintHeight() <= 32.0f * scale + 0.5f,
+          "compact footer <=32*S context=%s source=%d page=%d lang=%d %dp (%.1f)",
+          context, ui::DebugHintSource(), ui::DebugPage(), (int)i18n::Current(), (int)height, ui::DebugHintHeight());
+    float top = 0, bottom = 0, contentBottom = 0;
+    CHECK(ui::DebugHintLayout(top, bottom, contentBottom) && top >= contentBottom - 0.5f &&
+          top >= 0 && bottom > top && bottom - top <= 32.0f * scale + 0.5f && bottom <= height + 0.5f,
+          "footer outside content/on screen context=%s source=%d page=%d lang=%d %dp (%.1f/%.1f/%.1f)",
+          context, ui::DebugHintSource(), ui::DebugPage(), (int)i18n::Current(), (int)height, contentBottom, top, bottom);
+    const auto bounds = ui::DebugHintBounds();
+    const auto items = ui::DebugHintItems();
+    CHECK(!items.empty() && bounds.rows == ui::DebugHintRows() && bounds.rows == 1,
+          "actual rendered footer has one row context=%s source=%d page=%d lang=%d %dp rows=%d items=%d",
+          context, ui::DebugHintSource(), ui::DebugPage(), (int)i18n::Current(), (int)height, bounds.rows, (int)items.size());
+    bool atomicItems = true, conciseNavigation = true;
+    for (const auto& item : items) {
+        atomicItems &= !item.empty() && item.find_first_of("\r\n") == std::string::npos;
+        conciseNavigation &= item.find("Arrows") == std::string::npos &&
+                             item.find("HJKL") == std::string::npos && item.find("Tab") == std::string::npos;
+    }
+    CHECK(conciseNavigation,
+          "actual footer never advertises Arrows/HJKL/Tab context=%s source=%d page=%d lang=%d %dp",
+          context, ui::DebugHintSource(), ui::DebugPage(), (int)i18n::Current(), (int)height);
+    CHECK(atomicItems && bounds.availableLeft >= 0 && bounds.availableRight <= ImGui::GetIO().DisplaySize.x + 0.5f &&
+          bounds.availableRight > bounds.availableLeft && bounds.textRight > bounds.textLeft &&
+          bounds.textLeft >= bounds.availableLeft - 0.5f && bounds.textRight <= bounds.availableRight + 0.5f &&
+          bounds.textTop >= top - 0.5f && bounds.textBottom > bounds.textTop && bounds.textBottom <= bottom + 0.5f,
+          "actual unwrapped key/action groups fit footer context=%s source=%d page=%d lang=%d %dp text=(%.1f,%.1f)-(%.1f,%.1f)",
+          context, ui::DebugHintSource(), ui::DebugPage(), (int)i18n::Current(), (int)height,
+          bounds.textLeft, bounds.textTop, bounds.textRight, bounds.textBottom);
+    const auto rows = ui::DebugHintRowBounds();
+    CHECK(rows.size() == 1 && rows[0].groupCount == static_cast<int>(items.size()) &&
+          rows[0].right > rows[0].left && rows[0].bottom > rows[0].top &&
+          rows[0].left >= bounds.availableLeft - 0.5f && rows[0].right <= bounds.availableRight + 0.5f &&
+          rows[0].top >= top - 0.5f && rows[0].bottom <= bottom + 0.5f,
+          "single unwrapped row contains every actual group without clipping context=%s source=%d page=%d lang=%d %dp",
+          context, ui::DebugHintSource(), ui::DebugPage(), (int)i18n::Current(), (int)height);
+    bool anchored = bounds.leftActionCount >= 0 && bounds.rightActionCount >= 0 &&
+                    bounds.leftActionCount + bounds.rightActionCount == static_cast<int>(items.size());
+    if (bounds.leftActionCount > 0)
+        anchored &= std::fabs(bounds.textLeft - bounds.availableLeft) <= 1.0f &&
+                    bounds.leftActionsRight > bounds.availableLeft && bounds.leftActionsRight <= bounds.availableRight + 0.5f;
+    if (bounds.rightActionCount > 0)
+        anchored &= std::fabs(bounds.textRight - bounds.availableRight) <= 1.0f &&
+                    bounds.rightActionsLeft >= bounds.availableLeft - 0.5f && bounds.rightActionsLeft < bounds.availableRight;
+    if (bounds.leftActionCount > 0 && bounds.rightActionCount > 0)
+        anchored &= bounds.rightActionsLeft - bounds.leftActionsRight >= 12.0f * scale - 0.5f;
+    CHECK(anchored,
+          "left actions/right navigation anchored with nonoverlapping 12*S partition gap context=%s source=%d page=%d lang=%d %dp",
+          context, ui::DebugHintSource(), ui::DebugPage(), (int)i18n::Current(), (int)height);
+    const auto icons = ui::DebugHintIcons();
+    CHECK(icons.keycaps >= 0 && icons.padButtons >= 0 && icons.shoulders >= 0 && icons.directional >= 0 &&
+          icons.specialGlyphs == 0 && icons.maxCenterError >= 0 && icons.maxCenterError <= 1.0f,
+          "draw-list geometric controls vertically centered without special glyphs context=%s source=%d page=%d lang=%d %dp",
+          context, ui::DebugHintSource(), ui::DebugPage(), (int)i18n::Current(), (int)height);
+    CHECK(bounds.separatorRight > bounds.separatorLeft && bounds.separatorLeft >= bounds.availableLeft - 0.5f &&
+          bounds.separatorRight <= bounds.availableRight + 0.5f &&
+          bounds.sidebarBottom + scale <= bounds.separatorY + 0.01f &&
+          bounds.separatorY >= contentBottom - 0.5f && bounds.separatorY + scale <= bounds.textTop + 0.01f,
+          "sidebar stops before footer separator; text clears rule context=%s source=%d page=%d lang=%d %dp",
+          context, ui::DebugHintSource(), ui::DebugPage(), (int)i18n::Current(), (int)height);
+}
+
+static bool DisplayedHintContains(const char* text)
+{
+    for (const auto& item : ui::DebugHintItems())
+        if (item.find(text) != std::string::npos) return true;
+    return false;
+}
+
+// Exercise the production ImGui event hook, not a debug source setter.  In
+// particular, virtual navigation generated from WASD must remain keyboard input.
+static void TestContextHints()
+{
+    Config* original = m.cfg;
+    const auto language = i18n::Current();
+    ImGuiIO& io = ImGui::GetIO();
+    const ImVec2 display = io.DisplaySize;
+    const bool trickle = io.ConfigInputTrickleEventQueue;
+    io.ConfigInputTrickleEventQueue = false;
+    Config c;
+    for (int id = 1; id <= 20; ++id) {
+        LoadoutSet s; s.id = id; s.name = "Hint row " + std::to_string(id);
+        c.sets.push_back(s); c.foods[id] = FoodPreset(); c.foodOrder.push_back(id);
+    }
+    c.activeSet = 1; c.food = 1; m.cfg = &c;
+    i18n::Set(i18n::kEn);
+    auto settle = [&] { for (int n = 0; n < 45; ++n) Frame(); };
+    auto open = [&](int page) {
+        ui::OnOpen(m); ui::DebugGo(page, page == 5 ? 1 : 0); settle();
+        m.reqClose = m.reqRestart = false;
+    };
+    auto key = [&] { Press(ImGuiKey_Q); };
+    auto pad = [&] { Press(ImGuiKey_GamepadR2); };
+    auto wheel = [&] { io.AddMouseWheelEvent(0, -1); Frame(); };
+    open(6);
+    key(); CHECK(ui::DebugHintSource() == 1, "real keyboard event selects keyboard hints");
+    pad(); CHECK(ui::DebugHintSource() == 0, "real gamepad event selects gamepad hints");
+    key(); CHECK(ui::DebugHintSource() == 1, "keyboard retakes hints from pad");
+    io.AddMousePosEvent(20, 20); Frame();
+    key();
+    for (int n = 0; n < 30; ++n) { io.AddMousePosEvent(20.0f + static_cast<float>(n % 2), 20.0f + static_cast<float>(n % 3)); Frame(); }
+    CHECK(ui::DebugHintSource() == 1, "sub-threshold oscillating mouse jitter never steals hints");
+    io.AddMousePosEvent(55, 45); Frame();
+    CHECK(ui::DebugHintSource() == 2, "meaningful real mouse movement selects mouse hints");
+    pad(); wheel();
+    CHECK(ui::DebugHintSource() == 2, "wheel without mouse movement selects mouse hints");
+    key(); io.AddMouseButtonEvent(0, true); Frame();
+    CHECK(ui::DebugHintSource() == 2, "mouse click without movement selects mouse hints");
+    key(); io.AddMouseButtonEvent(0, false); Frame();
+    CHECK(ui::DebugHintSource() == 1, "mouse button release never steals keyboard hints");
+    for (float value : {0.01f, 0.08f, 0.15f, 0.01f}) {
+        io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickLeft, true, value); Frame();
+    }
+    CHECK(ui::DebugHintSource() == 1, "gamepad analog noise below threshold never steals keyboard hints");
+    io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickLeft, false, 0); Frame();
+    pad(); io.AddInputCharacter('q'); Frame();
+    CHECK(ui::DebugHintSource() == 1, "character-only input selects keyboard hints");
+    io.AddKeyAnalogEvent(ImGuiKey_GamepadR2, true, 0.8f); Frame();
+    CHECK(ui::DebugHintSource() == 0, "fresh gamepad analog edge selects gamepad hints");
+    key();
+    for (int n = 0; n < 50; ++n) { io.AddKeyAnalogEvent(ImGuiKey_GamepadR2, true, 0.8f); Frame(); }
+    CHECK(ui::DebugHintSource() == 1, "held gamepad analog cannot reclaim keyboard hints");
+    wheel();
+    for (int n = 0; n < 10; ++n) Frame();
+    CHECK(ui::DebugHintSource() == 2, "held gamepad cannot reclaim mouse hints");
+    io.AddKeyAnalogEvent(ImGuiKey_GamepadR2, false, 0); Frame();
+    CHECK(ui::DebugHintSource() == 2, "gamepad release does not steal mouse source");
+    io.AddKeyEvent(ImGuiKey_Q, true); io.AddKeyEvent(ImGuiKey_GamepadR2, true); Frame();
+    CHECK(ui::DebugHintSource() == 0, "same-frame key then pad uses last genuine event");
+    io.AddKeyEvent(ImGuiKey_Q, false); io.AddKeyEvent(ImGuiKey_GamepadR2, false); Frame();
+    io.AddKeyEvent(ImGuiKey_GamepadR2, true); io.AddKeyEvent(ImGuiKey_Q, true); Frame();
+    CHECK(ui::DebugHintSource() == 1, "same-frame pad then key uses last genuine event");
+    io.AddKeyEvent(ImGuiKey_GamepadR2, false); io.AddKeyEvent(ImGuiKey_Q, false); Frame();
+    io.AddKeyEvent(ImGuiKey_GamepadR2, true); io.AddMouseWheelEvent(0, 1); Frame();
+    CHECK(ui::DebugHintSource() == 2, "same-frame pad then wheel uses last genuine event");
+    io.AddKeyEvent(ImGuiKey_GamepadR2, false); Frame();
+    io.AddMouseWheelEvent(0, -1); io.AddKeyEvent(ImGuiKey_Q, true); Frame();
+    CHECK(ui::DebugHintSource() == 1, "same-frame wheel then key uses last genuine event");
+    io.AddKeyEvent(ImGuiKey_Q, false); Frame();
+    open(2); Press(ImGuiKey_S);
+    CHECK(ui::DebugHintSource() == 1, "WASD synthetic navigation stays keyboard source");
+
+    for (int height : {720, 1080}) {
+        io.DisplaySize = ImVec2(height * 16.0f / 9.0f, (float)height);
+        ui::Init(height / 1080.0f);
+        for (auto lang : {i18n::kZh, i18n::kEn, i18n::kJa}) {
+            i18n::Set(lang);
+            for (int page = 0; page < 7; ++page) {
+                open(page);
+                key(); const std::string keyboard = ui::DebugHintText(); CheckCompactFooter("page keyboard");
+                const auto keyboardItems = ui::DebugHintItems();
+                if (page == 2 || page == 4) {
+                    CheckListHintControls();
+                    const auto icons = ui::DebugHintIcons();
+                    CHECK(DisplayedHintContains("WASD") && icons.keycaps > 0 &&
+                          icons.padButtons == 0 && icons.shoulders == 0,
+                          "keyboard list draws WASD keycaps %dp lang=%d page=%d", height, lang, page);
+                }
+                pad(); const std::string gamepad = ui::DebugHintText(); CheckCompactFooter("page gamepad");
+                const auto gamepadItems = ui::DebugHintItems();
+                if (page == 2 || page == 4) {
+                    CheckListHintControls();
+                    const auto icons = ui::DebugHintIcons();
+                    CHECK(icons.padButtons > 0 && icons.directional > 0,
+                          "gamepad list draws face buttons and D-pad %dp lang=%d page=%d", height, lang, page);
+                }
+                wheel(); const std::string mouse = ui::DebugHintText(); CheckCompactFooter("page mouse");
+                CHECK(keyboardItems != gamepadItems && ui::DebugHintItems() != gamepadItems,
+                      "actual displayed groups react to all real sources %dp lang=%d page=%d", height, lang, page);
+                CHECK(!keyboard.empty() && !gamepad.empty() && !mouse.empty() &&
+                      keyboard != gamepad && mouse != gamepad,
+                      "all page footers react to real sources %dp lang=%d page=%d", height, lang, page);
+            }
+        }
+    }
+    i18n::Set(i18n::kEn);
+    open(0); Press(ImGuiKey_GamepadDpadLeft);
+    CHECK(ui::DebugSidebarFocused() && ui::DebugHintText().find("switch page") != std::string::npos &&
+          ui::DebugHintText().find("reorder") == std::string::npos,
+          "sidebar hints describe switching pages, not content row actions");
+    open(1); ui::DebugFocusSearch(); Frame(); io.AddInputCharacter('z'); Frame();
+    CHECK(ui::DebugHintSource() == 1 && ui::DebugHintText().find("Type") != std::string::npos &&
+          ui::DebugHintText().find("WASD") == std::string::npos,
+          "active search describes typing, never letter navigation");
+    Press(ImGuiKey_Escape); settle();
+    open(2); key(); const std::string list = ui::DebugHintText();
+    CheckCompactFooter("keyboard list");
+    CHECK((DisplayedHintContains("Enter Apply") || DisplayedHintContains("Enter Off")) && DisplayedHintContains("Y Edit") &&
+          DisplayedHintContains("WASD") && !DisplayedHintContains("Arrows") &&
+          !DisplayedHintContains("HJKL") && !DisplayedHintContains("Tab") &&
+          DisplayedHintContains("F Rename"),
+          "actual keyboard list retains rename alongside primary apply/edit and WASD");
+    CHECK(list.find("F rename") != std::string::npos && list.find("Ctrl + Up / Down") != std::string::npos &&
+          list.find("LB / RB") == std::string::npos, "keyboard row hints use real keyboard rename/reorder controls only");
+    pad();
+    CheckCompactFooter("gamepad list");
+    CHECK((DisplayedHintContains("A Apply") || DisplayedHintContains("A Off")) && DisplayedHintContains("Y Edit") &&
+          DisplayedHintContains("D-pad") && DisplayedHintContains("X Rename") && !DisplayedHintContains("Ctrl+"),
+          "actual gamepad list retains rename alongside primary apply/edit and D-pad");
+    CHECK(ui::DebugHintText().find("X rename") != std::string::npos &&
+          ui::DebugHintText().find("LB / RB") != std::string::npos && ui::DebugHintText().find("F rename") == std::string::npos,
+          "gamepad row hints use real pad rename/reorder controls only");
+    key();
+    Press(ImGuiKey_E); const std::string moving = ui::DebugHintText();
+    CheckCompactFooter("move mode");
+    CHECK(DisplayedHintContains("Drop") && DisplayedHintContains("Finish") &&
+          !DisplayedHintContains("Reorder") && !DisplayedHintContains("Cancel"),
+          "actual move groups describe drop/finish instead of reorder/rollback");
+    CHECK(ui::DebugMoveActive() && moving != list && !moving.empty(), "E move context replaces normal list actions immediately");
+    CHECK(moving.find("drop") != std::string::npos && moving.find("reorder") == std::string::npos &&
+          moving.find("cancel") == std::string::npos, "move hints describe drop/finish, never rollback or direct reorder");
+    Press(ImGuiKey_Escape);
+    CHECK(!ui::DebugMoveActive() && ui::DebugPage() == 2 && !m.reqClose,
+          "move footer return means put down, not page back");
+    ui::DebugOpenRename(); settle(); key();
+    const std::string rename = ui::DebugHintText();
+    CheckCompactFooter("rename modal");
+    CHECK(DisplayedHintContains("Type name") && DisplayedHintContains("Confirm") &&
+          !DisplayedHintContains("Reorder"), "actual rename groups replace underlying list actions");
+    CHECK(!rename.empty() && rename != list && rename.find("rename") == std::string::npos &&
+          rename.find("reorder") == std::string::npos, "rename footer suppresses underlying list shortcuts");
+    Press(ImGuiKey_Escape); settle();
+    open(3); key(); const std::string edit = ui::DebugHintText();
+    ui::DebugOpenDelete(); settle(); key();
+    CheckCompactFooter("delete modal");
+    CHECK(DisplayedHintContains("Close") && !DisplayedHintContains("Reorder"),
+          "actual delete modal groups replace underlying editor actions");
+    CHECK(!ui::DebugHintText().empty() && ui::DebugHintText() != edit,
+          "delete modal footer replaces underlying editor shortcuts");
+    Press(ImGuiKey_Escape); settle();
+    open(6); key(); const std::string settings = ui::DebugHintText();
+    ui::DebugStartCapture(m, 0, false); Frame();
+    CheckCompactFooter("keyboard capture");
+    CHECK(DisplayedHintContains("Keys") && DisplayedHintContains("Release saves") &&
+          !DisplayedHintContains("Navigate"), "actual keyboard capture groups replace settings navigation");
+    CHECK(m.capturing && !ui::DebugHintText().empty() && ui::DebugHintText() != settings,
+          "keyboard capture footer overrides settings navigation");
+    Press(ImGuiKey_Escape); settle();
+    ui::DebugStartCapture(m, 0, true); Frame(); pad();
+    CheckCompactFooter("gamepad capture");
+    CHECK(DisplayedHintContains("X Alone: clear") && !DisplayedHintContains("B Cancel"),
+          "actual pad capture groups explain X clear without false B cancel");
+    CHECK(m.capturing && ui::DebugHintText().find("X alone clears") != std::string::npos &&
+          ui::DebugHintText().find("B cancel") == std::string::npos,
+          "gamepad capture explains X clear, does not falsely promise B cancellation");
+    Press(ImGuiKey_Escape); settle();
+    open(6); ui::DebugFocusHotkey(false); Frame(); key();
+    CheckCompactFooter("hotkey chip");
+    CHECK(DisplayedHintContains("Capture"), "actual focused hotkey group advertises capture");
+    CHECK(ui::DebugHintText().find("capture hotkey") != std::string::npos,
+          "focused hotkey chip advertises capture");
+    // Cross-context regression uses real D-pad navigation without OnOpen/Init
+    // between targets: stale flags must be reset every frame, not on page open.
+    for (int n = 0; n < 8 && !ui::DebugSidebarFocused(); ++n) Press(ImGuiKey_GamepadDpadLeft);
+    CheckCompactFooter("hotkey-to-sidebar");
+    CHECK(DisplayedHintContains("D-pad Nav") && !DisplayedHintContains("Capture"),
+          "actual sidebar navigation clears previous hotkey context");
+    CHECK(ui::DebugSidebarFocused() && ui::DebugHintText().find("switch page") != std::string::npos &&
+          ui::DebugHintText().find("capture hotkey") == std::string::npos,
+          "real hotkey-to-sidebar transition clears capture context");
+    Press(ImGuiKey_GamepadDpadRight);
+    for (int n = 0; n < 16 && ui::DebugHintText().find("adjust") == std::string::npos; ++n)
+        Press(ImGuiKey_GamepadDpadDown);
+    CheckCompactFooter("sidebar-to-slider");
+    CHECK(DisplayedHintContains("Adjust") && !DisplayedHintContains("Capture"),
+          "actual slider groups clear previous hotkey context");
+    CHECK(ui::DebugHintText().find("adjust") != std::string::npos &&
+          ui::DebugHintText().find("capture hotkey") == std::string::npos,
+          "real sidebar-to-opacity navigation replaces hotkey with slider hints");
+    for (int n = 0; n < 8 && !ui::DebugSidebarFocused(); ++n) Press(ImGuiKey_GamepadDpadLeft);
+    Press(ImGuiKey_GamepadDpadUp); Press(ImGuiKey_GamepadDpadUp); // Settings -> Meals -> Loadouts
+    Press(ImGuiKey_GamepadDpadRight);
+    CHECK(ui::DebugPage() == 2 && ui::DebugHintText().find("X rename") != std::string::npos &&
+          ui::DebugHintText().find("adjust") == std::string::npos &&
+          ui::DebugHintText().find("capture hotkey") == std::string::npos,
+          "real slider-to-loadout navigation clears slider/hotkey context");
+    Press(ImGuiKey_GamepadFaceRight); // Loadouts -> Home
+    CHECK(ui::DebugPage() == 0 && ui::DebugHintText().find("rename") == std::string::npos &&
+          ui::DebugHintText().find("adjust") == std::string::npos,
+          "real list-to-home back clears list and slider actions");
+    Press(ImGuiKey_GamepadDpadDown); Press(ImGuiKey_GamepadDpadLeft); Press(ImGuiKey_GamepadFaceDown);
+    CHECK(ui::DebugPage() == 1 && ui::DebugHintText().find("rename") == std::string::npos &&
+          ui::DebugHintText().find("adjust") == std::string::npos &&
+          ui::DebugHintText().find("capture hotkey") == std::string::npos,
+          "real home-to-quest navigation leaves no sticky action context");
+    open(0); key();
+    CHECK(ui::DebugHintText().find("capture hotkey") == std::string::npos,
+          "hotkey context cannot leak into home on the next frame");
+    c.enabled = true; open(2); key(); const std::string loaded = ui::DebugHintText();
+    c.enabled = false; Frame();
+    CheckListHintControls();
+    pad(); CheckListHintControls(); CheckCompactFooter("disabled pad list"); key();
+    CHECK(!ui::DebugHintText().empty() && ui::DebugHintText() != loaded,
+          "Dormant list footer does not promise disabled apply action");
+    // Reach Meals through actual sidebar navigation. Noncontiguous preset IDs
+    // make an accidental row-index/id mixup visible; locked/dormant only block A.
+    const Config beforeMealStates = c;
+    for (int state = 0; state < 4; ++state) {
+        c = Config();
+        LoadoutSet set; set.id = 17; set.name = "Meal focus fixture";
+        set.food = state == 2 ? 41 : -1;
+        c.sets.push_back(set); c.activeSet = 17;
+        c.foods[41] = FoodPreset(); c.foods[73] = FoodPreset();
+        c.foods[41].name = "First meal"; c.foods[73].name = "Second meal";
+        c.foodOrder = {41, 73}; c.food = state == 0 ? 41 : -1;
+        c.enabled = state != 3;
+        open(0);
+        Press(ImGuiKey_GamepadDpadLeft);
+        Press(ImGuiKey_GamepadDpadDown); Press(ImGuiKey_GamepadDpadDown);
+        CHECK(ui::DebugSidebarFocused() && ui::DebugSidebarFocusIndex() == 2 && ui::DebugPage() == 4,
+              "real sidebar reaches Meals state=%d", state);
+        io.AddKeyEvent(ImGuiKey_GamepadDpadRight, true); Frame();
+        CHECK(!ui::DebugSidebarFocused() && DisplayedHintContains("Y Edit") && DisplayedHintContains("X Rename"),
+              "sidebar Right first draw immediately exposes existing meal row focus state=%d", state);
+        io.AddKeyEvent(ImGuiKey_GamepadDpadRight, false); Frame(); settle();
+        CHECK(!ui::DebugSidebarFocused() && ui::DebugPage() == 4 &&
+              DisplayedHintContains("Y Edit") && DisplayedHintContains("X Rename"),
+              "selected/unselected/locked/dormant Meals retains Y edit and X rename state=%d", state);
+        CheckCompactFooter("real sidebar Meals states");
+        if (state >= 2) {
+            CHECK(!DisplayedHintContains("A Apply") && !DisplayedHintContains("A Off"),
+                  "locked/dormant Meals suppresses only apply action state=%d", state);
+            const int fallback = c.food;
+            Press(ImGuiKey_GamepadFaceDown);
+            CHECK(c.food == fallback && DisplayedHintContains("Y Edit") && DisplayedHintContains("X Rename"),
+                  "blocked A cannot change meal or hide editing state=%d", state);
+        }
+        const int fallback = c.food;
+        Press(ImGuiKey_GamepadFaceUp);
+        CHECK(ui::DebugPage() == 5 && c.food == fallback,
+              "real Y enters food editor without changing selection state=%d", state);
+        if (state == 0) {
+            Press(ImGuiKey_GamepadFaceRight); settle();
+            Press(ImGuiKey_GamepadL3); settle();
+            CHECK(ui::DebugPage() == 4 && ui::DebugMoveActive() && ui::DebugMoveId() == 41 &&
+                  ui::DebugHintIcons().stickPress > 0 && DisplayedHintContains("Drop"),
+                  "real Meals LS press enters moving actual stable ID with geometric press cue");
+            Press(ImGuiKey_GamepadFaceRight);
+        }
+    }
+    c = beforeMealStates;
+    io.ConfigInputTrickleEventQueue = trickle;
+    io.DisplaySize = display; ui::Init(display.y / 1080.0f); i18n::Set(language);
+    m.cfg = original; m.padHeld = 0; m.keysHeld.clear(); ui::OnOpen(m); settle();
+}
+
+static void TestFoodPreviewNavigation()
+{
+    const ui::Model before = m;
+    Config* original = m.cfg;
+    const auto language = i18n::Current();
+    const ImVec2 display = ImGui::GetIO().DisplaySize;
+    Config c;
+    LoadoutSet set; set.id = 17; set.name = "Preview set"; set.food = 41;
+    c.sets.push_back(set); c.activeSet = 17; c.food = 73;
+    FoodPreset meal; meal.name = "Preview meal"; meal.hp = 5; meal.stamina = 2;
+    meal.skill[0] = 32; meal.skill[1] = 9; meal.skill[2] = 39;
+    c.foods[41] = meal; meal.name = "Candidate meal"; c.foods[73] = meal; c.foodOrder = {41, 73};
+    m.cfg = &c;
+    auto checkPreview = [&](bool popup, int fid) {
+        const auto b = ui::DebugFoodPreviewBounds();
+        const std::string text = ui::DebugFoodPreviewText();
+        CHECK(b.visible && b.fromPopup == popup && b.foodId == fid &&
+              b.left >= 0 && b.top >= 0 && b.right > b.left && b.bottom > b.top &&
+              b.right <= ImGui::GetIO().DisplaySize.x + 0.5f && b.bottom <= ImGui::GetIO().DisplaySize.y + 0.5f &&
+              (b.right <= b.anchorLeft + 0.5f || b.left >= b.anchorRight - 0.5f ||
+               b.bottom <= b.anchorTop + 0.5f || b.top >= b.anchorBottom - 0.5f),
+              "meal preview real anchor/screen bounds want popup=%d id=%d lang=%d %dp actual visible=%d popup=%d id=%d rect=(%.1f,%.1f)-(%.1f,%.1f) anchor=(%.1f,%.1f)-(%.1f,%.1f) nav=%08X active=%08X",
+              popup, fid, (int)i18n::Current(), (int)ImGui::GetIO().DisplaySize.y,
+              b.visible, b.fromPopup, b.foodId, b.left, b.top, b.right, b.bottom,
+              b.anchorLeft, b.anchorTop, b.anchorRight, b.anchorBottom, GImGui->NavId, GImGui->ActiveId);
+        CHECK(text.find(i18n::Tr("体力+50 耐力+50", "HP+50 Stam+50", "体力+50 スタミナ+50")) != std::string::npos &&
+              text.find(ui::DebugFoodSkillsSummary(c.foods[fid])) != std::string::npos,
+              "meal preview contains HP/stamina bonus and all three ordered localized short skills");
+        const ImGuiID focus = GImGui->NavId;
+        for (int n = 0; n < 3; ++n) Frame();
+        CHECK(GImGui->NavId == focus && c.sets[0].food == 41 && c.food == 73 && !m.reqSave && !m.reqApplyEquip,
+              "foreground meal preview never steals nav or mutates selection");
+    };
+    for (int height : {720, 1080}) {
+        ImGui::GetIO().DisplaySize = ImVec2(height * 16.0f / 9.0f, (float)height); ui::Init(height / 1080.0f);
+        for (auto lang : {i18n::kZh, i18n::kEn, i18n::kJa}) {
+            i18n::Set(lang);
+            c.foods[41].name = "Preview meal";
+            if (height == 720 && lang == i18n::kZh) {
+                c.foods[41].name.clear();
+                for (int n = 0; n < 50; ++n) c.foods[41].name += "长";
+            }
+            ui::OnOpen(m); ui::DebugGo(2, 0);
+            for (int n = 0; n < 45; ++n) Frame();
+            Press(ImGuiKey_GamepadFaceUp);
+            CHECK(ui::DebugPage() == 3, "real Y opens loadout editor before meal preview");
+            Press(ImGuiKey_GamepadDpadDown); Press(ImGuiKey_GamepadDpadDown); Press(ImGuiKey_GamepadDpadDown);
+            m.reqSave = m.reqApplyEquip = false;
+            checkPreview(false, 41);
+            const auto rowBounds = ui::DebugFoodPreviewBounds();
+            Press(ImGuiKey_GamepadDpadUp);
+            const ImGuiID rowFocus = GImGui->NavId;
+            // ImGui ignores invalid->same-last-valid position as a mouse move.
+            // Cross a real screen point first so every language case exits pad hover suppression.
+            ImGui::GetIO().AddMousePosEvent(10, 10); Frame();
+            ImGui::GetIO().AddMousePosEvent((rowBounds.anchorLeft + rowBounds.anchorRight) * 0.5f,
+                                          (rowBounds.anchorTop + rowBounds.anchorBottom) * 0.5f); Frame();
+            CHECK(ui::DebugFoodPreviewBounds().visible && GImGui->NavId == rowFocus,
+                  "meal row mouse hover preview preserves existing keyboard/pad focus visible=%d id=%d nav=%08X expected=%08X hoverDisabled=%d mouse=(%.1f,%.1f) anchor=(%.1f,%.1f)-(%.1f,%.1f)",
+                  ui::DebugFoodPreviewBounds().visible, ui::DebugFoodPreviewBounds().foodId, GImGui->NavId, rowFocus,
+                  GImGui->NavHighlightItemUnderNav, ImGui::GetIO().MousePos.x, ImGui::GetIO().MousePos.y,
+                  rowBounds.anchorLeft, rowBounds.anchorTop, rowBounds.anchorRight, rowBounds.anchorBottom);
+            ImGui::GetIO().AddMousePosEvent(-FLT_MAX, -FLT_MAX); Frame();
+            Press(ImGuiKey_GamepadDpadDown);
+            Press(ImGuiKey_GamepadFaceDown);
+            checkPreview(true, 41);
+            const auto candidate41 = ui::DebugFoodPreviewBounds();
+            Press(ImGuiKey_GamepadDpadDown);
+            checkPreview(true, 73);
+            const ImGuiID candidateFocus = GImGui->NavId;
+            ImGui::GetIO().AddMousePosEvent(10, 10); Frame();
+            ImGui::GetIO().AddMousePosEvent((candidate41.anchorLeft + candidate41.anchorRight) * 0.5f,
+                                          (candidate41.anchorTop + candidate41.anchorBottom) * 0.5f); Frame(); Frame();
+            CHECK(ui::DebugFoodPreviewBounds().visible && ui::DebugFoodPreviewBounds().fromPopup &&
+                  ui::DebugFoodPreviewBounds().foodId == 41 && GImGui->NavId == candidateFocus &&
+                  c.sets[0].food == 41 && !m.reqSave,
+                  "picker hover prioritizes inspected candidate without moving navigation or applying");
+            ImGui::GetIO().AddMousePosEvent(-FLT_MAX, -FLT_MAX); Frame();
+            Press(ImGuiKey_GamepadFaceRight);
+            CHECK(c.sets[0].food == 41 && !m.reqSave, "picker preview cancellation does not apply hovered/focused candidate");
+            c.sets[0].food = -1; Frame(); Frame();
+            CHECK(ui::DebugFoodPreviewBounds().visible && ui::DebugFoodPreviewBounds().foodId == 73 &&
+                  !m.reqSave && c.sets[0].food == -1,
+                  "global meal row previews actual global preset without storing an override");
+            c.sets[0].food = 999; Frame(); Frame();
+            CHECK(!ui::DebugFoodPreviewBounds().visible && c.foods.count(999) == 0 && !m.reqSave,
+                  "unknown meal reference creates no preview or invented preset");
+            c.sets[0].food = 41; c.foods[41].deleted = true; Frame(); Frame();
+            CHECK(ui::DebugFoodPreviewBounds().visible && ui::DebugFoodPreviewBounds().foodId == 41 &&
+                  c.foods[41].deleted && !m.reqSave,
+                  "referenced deleted meal preserves its real stored preview without resurrecting it");
+            c.foods[41].deleted = false;
+        }
+    }
+    ImGui::GetIO().DisplaySize = display; ui::Init(display.y / 1080.0f); i18n::Set(language);
+    m = before; m.cfg = original; ui::OnOpen(m); for (int n = 0; n < 5; ++n) Frame();
+}
+
+static void TestQuestSearchBoundary()
+{
+    const ui::Model before = m;
+    Config* original = m.cfg;
+    Config c; c.questId = 0; m.cfg = &c;
+    auto searchId = [&]() {
+        for (auto* w : GImGui->Windows)
+            if (w->Active && std::strstr(w->Name, "##content")) return w->GetID("##search");
+        return ImGuiID(0);
+    };
+    for (const auto& keys : std::vector<std::pair<ImGuiKey, ImGuiKey>>{
+             {ImGuiKey_UpArrow, ImGuiKey_DownArrow}, {ImGuiKey_GamepadDpadUp, ImGuiKey_GamepadDpadDown},
+             {ImGuiKey_W, ImGuiKey_S}}) {
+        ui::OnOpen(m); ui::DebugGo(1, 0);
+        for (int n = 0; n < 45; ++n) Frame();
+        m.reqClose = m.reqSave = false;
+        const ImGuiID firstRow = GImGui->NavId;
+        Press(keys.first);
+        const ImGuiID search = searchId();
+        CHECK(search != 0 && GImGui->NavId == search && ui::DebugPage() == 1,
+              "top quest row %s reaches native search field first=%08X search=%08X nav=%08X active=%08X text=%d flags=%X backend=%X query=%s", ImGui::GetKeyName(keys.first),
+              firstRow, search, GImGui->NavId, GImGui->ActiveId, ImGui::GetIO().WantTextInput,
+              ImGui::GetIO().ConfigFlags, ImGui::GetIO().BackendFlags, ui::DebugSearch().c_str());
+        Press(keys.second);
+        CHECK(GImGui->NavId == firstRow && !ImGui::GetIO().WantTextInput,
+              "search %s returns to first list row without selecting quest", ImGui::GetKeyName(keys.second));
+        Press(keys.first);
+        Press(keys.first == ImGuiKey_GamepadDpadUp ? ImGuiKey_GamepadFaceDown : ImGuiKey_Enter);
+        CHECK(ImGui::GetIO().WantTextInput && GImGui->ActiveId == search,
+              "search reached from list activates for actual typing");
+        ImGui::GetIO().AddInputCharactersUTF8("66845"); Frame(); Frame();
+        CHECK(ui::DebugSearch() == "66845" && c.questId == 0 && !m.reqSave,
+              "actual search typing filters without applying a quest");
+        Press(ImGuiKey_Enter); // Commit input; Escape may restore the pre-edit value.
+        Press(keys.second);
+        CHECK(ui::DebugPage() == 1 && GImGui->NavId != search && !m.reqClose && ui::DebugSearch() == "66845",
+              "filtered search exits down into native list navigation");
+        Press(keys.first);
+        CHECK(GImGui->NavId == search, "first filtered list item Up returns to native search");
+        ui::DebugSetSearch("zzzz-no-quest-xyz");
+        for (int n = 0; n < 4; ++n) Frame();
+        // Empty-result boundary has no selectable result: search remains the
+        // reachable native focus, then Down cannot apply a phantom quest.
+        CHECK(GImGui->NavId == search, "empty filtered list retains reachable search boundary");
+        Press(keys.second);
+        CHECK(ui::DebugPage() == 1 && c.questId == 0 && !m.reqSave && !m.reqClose,
+              "empty-result Down is safe and does not select or close");
+    }
+    m = before; m.cfg = original; ui::OnOpen(m);
+    for (int n = 0; n < 5; ++n) Frame();
+}
+
 int main()
 {
     TestSetSummary();
@@ -478,6 +1293,11 @@ int main()
     CHECK(ui::DebugPage() == 0 && !ui::DebugSidebarFocused(), "打开面板：在主页，焦点在内容区（%s）", PageName(ui::DebugPage()));
     TestNoWindowing();
     TestLetterNavigation();
+    TestDirectReorder();
+    TestDeleteModal();
+    TestContextHints();
+    TestQuestSearchBoundary();
+    TestFoodPreviewNavigation();
 
     g_sideTrace.clear();
     Press(ImGuiKey_GamepadDpadLeft);
@@ -1588,6 +2408,8 @@ int main()
         Press(ImGuiKey_GamepadFaceDown);
         CHECK(ui::DebugPage() == 2 && cfg.activeSet == firstId, "切回装载态后 A 能再次套用（%d）", cfg.activeSet);
     }
+
+    TestSettingsTransfer();
 
     ImGui_ImplDX11_Shutdown();
     ImGui::DestroyContext();

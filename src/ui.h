@@ -38,6 +38,11 @@ struct Model {
     bool reqClose = false;                // 关面板
     bool reqImportInq = false;            // 文件选择框里挑好了 config.txt：请求导入
     std::wstring inqPath;                 // 挑中的原版 config.txt（导入完清空）
+    bool reqResetView = false;            // Main requests render-thread editor/capture reset after import.
+    bool reqExportSettings = false;       // Main writes a timestamped .biq under backupsDir.
+    bool reqImportSettings = false;       // Set only after explicit overwrite confirmation.
+    std::wstring settingsPath;           // Confirmed backup source; main consumes and clears.
+    std::wstring backupsDir;             // Main initializes to plugin directory + Backups.
 
     // 设置快捷键：主循环每轮填现在按着的键，面板录完写回配置
     unsigned padHeld = 0;                 // 手柄（XINPUT_GAMEPAD_* 位 + kPadLT/kPadRT，见 input.h）
@@ -56,6 +61,43 @@ void Draw(Model& m, float screenW, float screenH);
 void DebugGo(int page, int editIndex);
 // 测试用：当前在哪一页（同上编号），焦点是不是在左侧栏
 int DebugPage();
+// Last rendered operation strip; source: 0 gamepad, 1 keyboard, 2 mouse.
+int DebugHintSource();
+std::string DebugHintText();
+float DebugHintHeight();
+bool DebugHintLayout(float& top, float& bottom, float& contentBottom);
+// Actual unwrapped, rendered hint geometry (not the clipping rectangle).
+struct DebugHintGeometry {
+    int rows = 0;
+    float textLeft = 0, textRight = 0, textTop = 0, textBottom = 0;
+    float availableLeft = 0, availableRight = 0;
+    float leftActionsRight = 0, rightActionsLeft = 0; // Actual single-row partition edges.
+    int leftActionCount = 0, rightActionCount = 0;
+    float separatorLeft = 0, separatorRight = 0, separatorY = 0, sidebarBottom = 0;
+};
+int DebugHintRows();
+DebugHintGeometry DebugHintBounds();
+std::vector<std::string> DebugHintItems(); // Actual displayed semantic key/action groups, in reading order.
+struct DebugHintRowGeometry {
+    float left = 0, right = 0, top = 0, bottom = 0;
+    int groupCount = 0;
+    float gapMin = 0, gapMax = 0;
+};
+std::vector<DebugHintRowGeometry> DebugHintRowBounds();
+struct DebugHintIconGeometry {
+    int keycaps = 0, padButtons = 0, shoulders = 0, directional = 0, specialGlyphs = 0;
+    int stickPress = 0; // Joystick glyphs with a geometric downward press arrow.
+    float maxCenterError = 0;
+};
+DebugHintIconGeometry DebugHintIcons();
+struct DebugFoodPreviewGeometry {
+    bool visible = false, fromPopup = false;
+    int foodId = 0;
+    float left = 0, right = 0, top = 0, bottom = 0;
+    float anchorLeft = 0, anchorRight = 0, anchorTop = 0, anchorBottom = 0;
+};
+DebugFoodPreviewGeometry DebugFoodPreviewBounds();
+std::string DebugFoodPreviewText();
 
 // 猫饭页列表里当前会出现哪些编号（含「删掉但还有人在用」的那几份，按显示顺序）
 std::vector<int> FoodRowIds(const Config& c);
@@ -79,6 +121,7 @@ int DebugClearStage();          // 两级确认走到第几层（0 = 没弹）
 void DebugOpenPick();
 void DebugClosePick();
 // 预览用：直接弹出「改名」输入框 / 关掉它
+void DebugOpenDelete(); // One-shot request for the next edit-page frame.
 void DebugOpenRename();
 void DebugCloseRename();
 // 预览用：直接进「移动顺序」模式（kind 1 = 套装，2 = 猫饭）/ 直接新建一套并弹起名框
