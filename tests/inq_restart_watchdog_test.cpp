@@ -144,6 +144,7 @@ int main()
     SetEnabled(true); RequestRestart(cfg);
     CHECK(!CheckRestartWatchdog(cfg, 10000000), "reenable starts clean timing");
     CHECK(CheckRestartWatchdog(cfg, 10012000), "reenabled stuck request recovers without Tick self-deadlock");
+    CHECK(chats == 2, "each separate watchdog recovery keeps its ordinary Chat feedback");
     // Exercise actual Tick timeout entry (not only its helper). No inflight
     // token may survive into CloseAndDrain, otherwise this call would hang.
     RequestRestart(cfg);

@@ -200,9 +200,12 @@ if ($What -eq "test" -or $What -eq "all") {
         "$Tests\settings_transfer_test.cpp", "$Src\settings_transfer.cpp", "$Src\config.cpp", "$Src\profile.cpp", "$Src\gamedata.cpp", "$Src\i18n.cpp", "$Src\log.cpp") +
         @("/link") + $WinLibs)
 
+    Compile ($Common + @("/Fo$Obj\", "/Isrc", "/Fe$Out\chat_once_test.exe",
+        "$Tests\chat_once_test.cpp", "$Tests\chat_once_other.cpp") + @("/link"))
+
     $fail = 0
     foreach ($t in @("hook_test", "gamedata_test", "config_test", "cursor_test", "kbdfilter_test", "hdr_test", "profile_test", "inqimport_test",
-                     "dinfilter_test", "ui_nav_test", "window_chain_test", "ime_test", "runtime_state_test", "restart_watchdog_test", "inq_restart_watchdog_test", "inq_equip_apply_test", "panel_gamepad_gate_test", "settings_transfer_test")) {
+                     "dinfilter_test", "ui_nav_test", "window_chain_test", "ime_test", "runtime_state_test", "restart_watchdog_test", "inq_restart_watchdog_test", "inq_equip_apply_test", "panel_gamepad_gate_test", "settings_transfer_test", "chat_once_test")) {
         Write-Host "  run $t.exe"
         & (Join-Path $Out "$t.exe")
         if ($LASTEXITCODE -ne 0) { $fail = $fail + 1 }

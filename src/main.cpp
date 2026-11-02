@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "config.h"
+#include "chat_once.h"
 #include "game.h"
 #include "startup_gate.h"
 #include "crashfilter.h"
@@ -44,7 +45,7 @@ volatile LONG g_teardown = 0;   // 窗口已销毁/进程在退出，这时候�
 // 窗口已经没了、我们正在收尾：异常处理器从此一律不碰（见 OnCrash）。
 std::atomic<bool> g_exiting{false};
 std::atomic<long> g_inCrash{0};
-const char* const kVersion = "0.7.3";
+const char* const kVersion = "0.7.3.1";
 
 // 主循环线程和游戏渲染线程（画面板）共用，都要先拿这把锁
 std::mutex g_mx;
@@ -310,8 +311,8 @@ DWORD WINAPI Worker(LPVOID)
     if (off.overlay) Log("debug: overlay 关掉了，没有面板（快捷键重开照常）");
     else Log("overlay: 等标题就绪后自动安装一次画面钩子；后续转场不限制面板");
 
-    if (ok) Chat(std::string("Better-IN-Q ") + kVersion + i18n::Tr(" 已就绪", " ready", " 準備完了"));
-    else Chat(i18n::Tr("Better-IN-Q：重开功能没装上，详情见 BetterINQ.log",
+    if (ok) ChatOnce(ChatNotice::Ready, std::string("Better-IN-Q ") + kVersion + i18n::Tr(" 已就绪", " ready", " 準備完了"));
+    else ChatOnce(ChatNotice::CoreUnavailable, i18n::Tr("Better-IN-Q：重开功能没装上，详情见 BetterINQ.log",
                        "Better-IN-Q: the restart hook did not install, see BetterINQ.log",
                        "Better-IN-Q：再開機能を組み込めませんでした。BetterINQ.log を見てください"));
 
@@ -377,7 +378,7 @@ DWORD WINAPI Worker(LPVOID)
             }
             if (ok2) {
                 Log("install 第 %d 次重试成功", inqTries);
-                Chat(std::string("Better-IN-Q ") + kVersion + i18n::Tr(" 已就绪", " ready", " 準備完了"));
+                ChatOnce(ChatNotice::Ready, std::string("Better-IN-Q ") + kVersion + i18n::Tr(" 已就绪", " ready", " 準備完了"));
             } else if (!again.empty()) {
                 Log("install 第 %d 次重试仍失败：%s", inqTries, again.c_str());
             }
@@ -434,7 +435,7 @@ DWORD WINAPI Worker(LPVOID)
         }
         const startup::Gate::PanelAction panelAction = startupGate.Panel(panelKey && !capturing, off.overlay);
         if (panelAction != startup::Gate::PanelAction::None) {
-            if (overlay::Failed() || !panelOk) Chat(i18n::Tr("Better-IN-Q：面板画不出来，详情见 BetterINQ.log（重开快捷键照常能用）",
+            if (overlay::Failed() || !panelOk) ChatOnce(ChatNotice::PanelUnavailable, i18n::Tr("Better-IN-Q：面板画不出来，详情见 BetterINQ.log（重开快捷键照常能用）",
                                                              "Better-IN-Q: the panel cannot be drawn, see BetterINQ.log (the restart hotkey still works)",
                                                              "Better-IN-Q：パネルを描画できません。BetterINQ.log を見てください（再開ホットキーは使えます）"));
             else SetPanel(!overlay::IsOpen());
@@ -442,7 +443,7 @@ DWORD WINAPI Worker(LPVOID)
         // 面板刚打开就发现画不出来：别一直挡着手柄和鼠标
         if (g_blocked && overlay::Failed()) {
             SetPanel(false);
-            Chat(i18n::Tr("Better-IN-Q：面板画不出来，详情见 BetterINQ.log（重开快捷键照常能用）",
+            ChatOnce(ChatNotice::PanelUnavailable, i18n::Tr("Better-IN-Q：面板画不出来，详情见 BetterINQ.log（重开快捷键照常能用）",
                           "Better-IN-Q: the panel cannot be drawn, see BetterINQ.log (the restart hotkey still works)",
                           "Better-IN-Q：パネルを描画できません。BetterINQ.log を見てください（再開ホットキーは使えます）"));
         }
@@ -490,6 +491,7 @@ DWORD WINAPI Worker(LPVOID)
                 if (settings_transfer::ImportFile(settings_transfer::CurrentStorage(), source, m.backupsDir, g_cfg, backup, error)) {
                     m.reqSave = false;
                     dirtyAt = 0;
+                    inq::ApplyOptions(g_cfg, true); // Imported IDs must not retain the old effective meal.
                     i18n::Set(i18n::FromString(g_cfg.language));
                     hdr::Configure(g_cfg.hdr, g_cfg.sdrNits);
                     hk.Parse(g_cfg);
@@ -554,7 +556,7 @@ DWORD WINAPI Worker(LPVOID)
                     // 原版存的是名字，我们存编号：趁现在游戏里的名单还在，换过来
                     const int lostNames = inq::NormalizeEquipItemNumbers(g_cfg);
                     // 导入把套装/猫饭整个换掉、编号重新发，生效值要跟着重算
-                    inq::ApplyOptions(g_cfg);
+                    inq::ApplyOptions(g_cfg, true);
                     if (!SaveSplit(basePath, cfgPath, g_cfg)) Log("config: 存盘失败");
                     Log("import: %d 个全套（%s）", n, inotes.c_str());
                     Chat(i18n::Fmt(i18n::Tr("Better-IN-Q：从原版 IN-Q 导入了 %d 个全套",
@@ -592,7 +594,7 @@ DWORD WINAPI Worker(LPVOID)
                     i18n::Set(i18n::FromString(g_cfg.language));
                     hdr::Configure(g_cfg.hdr, g_cfg.sdrNits);
                     hk.Parse(g_cfg);
-                    inq::ApplyOptions(g_cfg);
+                    inq::ApplyOptions(g_cfg, true);
                     m.reqSave = false;
                     dirtyAt = 0;
                     g_refreshNames = true;

@@ -7,7 +7,8 @@
 
 // Keep diagnostics local; tests must not invoke the game's chat function.
 void Log(const char*, ...) {}
-void Chat(const std::string&) {}
+static std::vector<std::string> chats;
+void Chat(const std::string& text) { chats.push_back(text); }
 
 static int failures = 0;
 #define CHECK(cond, label) do { if (!(cond)) { std::printf("FAIL: %s\n", label); ++failures; } } while (0)
@@ -86,7 +87,11 @@ static void CheckMealApply(std::uintptr_t load, std::uintptr_t food)
     CHECK(game::Rd<std::int32_t>(food + 0x19A4) == manual[0] &&
           game::Rd<std::int32_t>(food + 0x19C8) == manual[9], "selected meal leaves adjacent memory unchanged");
 
-    cfg.activeSet = -1; cfg.food = 4;
+    cfg.activeSet = -1;
+    ApplyOptions(cfg);
+    CHECK(g.food == 5, "deselecting set during loading preserves prior effective meal");
+    cfg.food = -1; ApplyOptions(cfg); // explicit global-food change
+    cfg.food = 4;
     seed(); ApplyOptions(cfg); Tick(cfg);
     cfg.food = -1; ApplyOptions(cfg); Tick(cfg);
     CHECK(unchanged(), "deselecting an applied meal does not clear previously written values");
@@ -115,6 +120,25 @@ int main()
 {
     using namespace inq;
     Config cfg;
+    if (!MapGlobal(game::pSave) || !MapGlobal(game::pUiBase) || !MapGlobal(game::pFood)) {
+        std::printf("FAIL: could not reserve fixed game global addresses\\n");
+        return 1;
+    }
+    // pQuest and pFood share one 64KiB allocation. Use real mapped pointers,
+    // never a fake classifier seam, for request and hook-side safety checks.
+    std::vector<unsigned char> save(0xB0), slot(0x140500), base(0x10000), ui(0x400),
+        load(0x1D10), equipUi(0x3000), pageUi(0x300), indexUi(0x300), objects(0x2B40),
+        food(0x1A00), quest(0x100), itemUi(0x100);
+    auto At = [](std::vector<unsigned char>& v) { return reinterpret_cast<std::uintptr_t>(v.data()); };
+    Put(game::pSave, At(save)); Put(At(save) + 0xA8, At(slot));
+    Put(game::pUiBase, At(base)); Put(At(base) + 0x278, At(ui));
+    Put(At(ui) + 0x20, At(load)); Put(At(ui) + 0x310, At(equipUi));
+    Put(At(ui) + 0x170, At(itemUi));
+    Put(At(ui) + 0x60, At(objects) + 0x80);
+    Put(At(equipUi) + 0x2960, At(pageUi)); Put(At(equipUi) + 0x2958, At(indexUi));
+    Put(At(objects) + 0x80 + 0x470, At(objects) + 0x5E0);
+    Put(game::pFood, At(food)); Put(game::pQuest, At(quest));
+    Put<std::uint32_t>(At(quest) + 0x38, 1);
     cfg.enabled = true;
     CHECK(!RequestEquipApply(cfg, "1"), "Dormant refuses requests");
     CHECK(g_pendingEquipApply.load() == 0, "Dormant does not publish work");
@@ -143,20 +167,6 @@ int main()
     CHECK(RequestActiveSetEquipApply(cfg) && g_pendingEquipApply.load() == 0,
           "unselect cancels pending without unequipping");
 
-    if (!MapGlobal(game::pSave) || !MapGlobal(game::pUiBase) || !MapGlobal(game::pFood)) {
-        std::printf("FAIL: could not reserve fixed game global addresses\n");
-        return 1;
-    }
-    std::vector<unsigned char> save(0xB0), slot(0x140500), base(0x300), ui(0x400),
-        load(0x1D10), equipUi(0x3000), pageUi(0x300), indexUi(0x300), objects(0x2B40), food(0x1A00);
-    auto At = [](std::vector<unsigned char>& v) { return reinterpret_cast<std::uintptr_t>(v.data()); };
-    Put(game::pSave, At(save)); Put(At(save) + 0xA8, At(slot));
-    Put(game::pUiBase, At(base)); Put(At(base) + 0x278, At(ui));
-    Put(At(ui) + 0x20, At(load)); Put(At(ui) + 0x310, At(equipUi));
-    Put(At(ui) + 0x60, At(objects) + 0x80);
-    Put(At(equipUi) + 0x2960, At(pageUi)); Put(At(equipUi) + 0x2958, At(indexUi));
-    Put(At(objects) + 0x80 + 0x470, At(objects) + 0x5E0);
-    Put(game::pFood, At(food));
     CheckMealApply(At(load), At(food));
 
     // Names are read from the current save each time, never cached by slot ID.
@@ -169,14 +179,93 @@ int main()
     names = ListEquipLoadouts();
     CHECK(!names.empty() && names[0].number == 1 && names[0].name == "After rename", "reread sees in-game rename without restart or changing stable slot");
 
+    // Hub -> quest TOCTOU: revalidate at the actual game-thread apply point.
+    CHECK(RequestEquipApply(cfg, "2"), "hub accepts equipment request");
+    Put<std::uint32_t>(At(quest) + 0x38, 2);
+    const auto beforeWarning = chats.size();
+    auto blocked = Context(); OnApplyResetAndEquip(&blocked);
+    CHECK(blocked.rax == 0x71D0 && g_pendingEquipApply.load() == 0,
+          "queued hub equipment cannot execute after quest entry");
+    CHECK(chats.size() == beforeWarning, "hook never chats directly");
+    Tick(cfg);
+    CHECK(chats.size() == beforeWarning + 1, "worker emits deferred safety warning");
+
+    cfg.activeSet = 1; cfg.food = -1;
+    cfg.foods[4] = FoodPreset{}; cfg.foods[4].attack = 3;
+    Put<std::int32_t>(At(food) + 0x19B0, 77);
+    cfg.sets[0].linkRadial = true;
+    Put<std::uint32_t>(At(slot) + 3 * 0x768 + 0x278, 1);
+    for (int i = 0; i < 80; ++i) Put<std::uint8_t>(At(slot) + kItemOrder + i, (std::uint8_t)i);
+    Put<std::uint8_t>(At(slot) + 0x140415, 7);
+    g.food = -1; g_haveFoodOption = false;
+    CHECK(RequestActiveSetEquipApply(cfg), "quest selection accepts item-only set");
+    CHECK(g_pendingEquipApply.load() == 0 && g.equipLoadout == 0 &&
+          g_pendingSetItem == 3 && g_pendingLink && g.food == -1,
+          "quest selection queues items and radial only");
+    ApplyOptions(cfg); ApplyOptions(cfg); // reqSave follows selection
+    CHECK(g.food == -1, "saving quest active-set selection does not activate set meal");
+    Put<std::uint32_t>(At(load) + 0x1D04, 1);
+    Tick(cfg);
+    CHECK(g_pendingSetItem == 0 && game::Rd<std::uint8_t>(At(slot) + 0x140415) == 7,
+          "loading cancels immediate items without applying radial");
+    CHECK(game::Rd<std::int32_t>(At(food) + 0x19B0) == 77,
+          "selection then save then loading does not apply newly selected set meal");
+    CHECK(!RequestActiveSetEquipApply(cfg) && g_pendingSetItem == 0,
+          "loading selection cannot publish delayed items");
+    Put<std::uint32_t>(At(load) + 0x1D04, 0);
+    RequestActiveSetEquipApply(cfg);
+    Tick(cfg);
+    CHECK(g_pendingSetItem == 0 && game::Rd<std::uint64_t>(At(base) + 0x4F60) == game::kItemLoadoutCmd &&
+          game::Rd<std::uint64_t>(At(base) + 0x4F68) == 2 &&
+          game::Rd<std::uint8_t>(At(slot) + 0x140415) == 1,
+          "item UI command and linked radial apply in quest");
+    Tick(cfg);
+    CHECK(game::Rd<std::uint8_t>(At(slot) + 0x140415) == 7, "radial restores after item application");
+    cfg.food = 5; ApplyOptions(cfg);
+    CHECK(g.food == 5, "manual global meal selection remains independent");
+    g.food = 4; ApplyOptions(cfg, true);
+    CHECK(g.food == 5, "configuration replacement resets old effective food even with unchanged global ID");
+    RequestActiveSetEquipApply(cfg); cfg.activeSet = -1; RequestActiveSetEquipApply(cfg);
+    CHECK(g_pendingSetItem == 0 && !g_hasPendingLink, "deselect cancels old immediate item work");
+    cfg.activeSet = 1; RequestActiveSetEquipApply(cfg);
+    cfg.sets[0].item.clear(); RequestActiveSetEquipApply(cfg);
+    CHECK(g_pendingSetItem == 0, "set without items replaces old item selection");
+    cfg.sets[0].item = "#3";
+    for (unsigned stage : {0u, 2u, 4u, 5u, 0xDu, 99u}) {
+        Put<std::uint32_t>(At(quest) + 0x38, stage);
+        CHECK(!RequestEquipApply(cfg, "2") && g_pendingEquipApply.load() == 0,
+              "unknown quest result and expedition states reject immediate equipment");
+    }
+    Put<std::uintptr_t>(game::pQuest, 0);
+    CHECK(!RequestEquipApply(cfg, "2"), "missing quest chain fails closed");
+    CHECK(!RequestActiveSetEquipApply(cfg) && g_pendingSetItem == 0 && g_pendingEquipApply.load() == 0,
+          "unknown state cannot publish equipment or delayed items");
+    Put(game::pQuest, At(quest)); Put<std::uint32_t>(At(quest) + 0x38, 2);
+    RequestRestart(cfg);
+    CHECK(g.equipLoadout == 2 && g_pendingSetItem == 3 && g.food == 4,
+          "intentional restart retains original equipment item and meal path");
+    const int restartItems = g_pendingSetItem;
+    cfg.sets[0].item.clear();
+    CHECK(!RequestActiveSetEquipApply(cfg) && g_pendingSetItem == restartItems,
+          "panel selection cannot overwrite intentional restart item queue");
+    auto restartEquip = Context(); OnApplyResetAndEquip(&restartEquip);
+    CHECK(restartEquip.rax == game::kVtEquipApply && g.equipLoadout == 0,
+          "original restart equipment applies even in quest");
+    CancelPending(); SetEnabled(false); SetEnabled(true);
+    RequestActiveSetEquipApply(cfg);
+    CHECK(chats.size() == beforeWarning + 1, "safety warning once survives restart cancellation and Dormant");
+    CancelPending(); cfg.activeSet = -1;
+    Put<std::uint32_t>(At(quest) + 0x38, 1);
+
     RequestEquipApply(cfg, "10");
     auto c = Context(); c.rax = 0;
     OnApplyResetAndEquip(&c);
     CHECK(g_pendingEquipApply.load() == 10, "unmatched UI call leaves request queued");
     Put<std::uint32_t>(At(load) + 0x1D04, 1);
     c = Context(); OnApplyResetAndEquip(&c);
-    CHECK(c.rax == 0x71D0 && g_pendingEquipApply.load() == 10, "loading defers without changing registers");
+    CHECK(c.rax == 0x71D0 && g_pendingEquipApply.load() == 0, "loading cancels unsafe immediate request without changing registers");
     Put<std::uint32_t>(At(load) + 0x1D04, 0);
+    RequestEquipApply(cfg, "10");
     Put<std::uintptr_t>(At(equipUi) + 0x2958, 0);
     c = Context(); OnApplyResetAndEquip(&c);
     CHECK(g_pendingEquipApply.load() == 10, "missing UI chain defers");
@@ -209,6 +298,46 @@ int main()
     c = Context(); OnApplyResetAndEquip(&c);
     CHECK(g_pendingEquipApply.load() == 0 && c.rax == 0x71D0, "Dormant clears work and hook is pass-through");
     CHECK(!RequestEquipApply(cfg, "3") && g_pendingEquipApply.load() == 0, "Dormant selection never revives work");
+    // Semantic categories stay consumed across callers, IDs and languages.
+    SetEnabled(true);
+    auto noticeStart = chats.size();
+    g_ready = false;
+    RequestRestart(cfg); RequestResetOnly(); RequestRestart(cfg);
+    CHECK(chats.size() == noticeStart + 1, "restart and reset-only share CoreUnavailable category");
+    g_ready = true;
+
+    noticeStart = chats.size();
+    LoadoutSet missing;
+    missing.equip = "old equipment name A"; missing.item = "old item name A";
+    QueueSet(missing);
+    missing.equip = "old equipment name B"; missing.item = "old item name B";
+    i18n::Set(i18n::kJa); QueueSet(missing); i18n::Set(i18n::kEn); QueueSet(missing);
+    CHECK(chats.size() == noticeStart + 2, "missing equipment and item each emit once despite text and language changes");
+    cfg.activeSet = 999;
+    RequestRestart(cfg); CancelPending();
+    cfg.activeSet = 1000;
+    RequestRestart(cfg); CancelPending();
+    CHECK(chats.size() == noticeStart + 3, "missing active set emits once across different IDs");
+    cfg.activeSet = -1;
+
+    noticeStart = chats.size();
+    for (int n : {78, 79, 78}) {
+        g_pendingSetItem = n;
+        Tick(cfg);
+    }
+    CHECK(chats.size() == noticeStart + 1, "empty item emits once across loadout IDs");
+    noticeStart = chats.size();
+    g.message = kMsgEquip | kMsgQuest | kMsgCant | kMsgWindow | kMsgNoQuest;
+    Tick(cfg);
+    CHECK(chats.size() == noticeStart + 5 && g.message == 0,
+          "each deferred failure category emits once and drains the pending bitmask");
+    CancelPending(); SetEnabled(false); SetEnabled(true);
+    i18n::Set(i18n::kZh);
+    g.message = kMsgEquip | kMsgQuest | kMsgCant | kMsgWindow | kMsgNoQuest;
+    Tick(cfg);
+    CHECK(chats.size() == noticeStart + 5 && g.message == 0,
+          "deferred failure categories stay consumed across language change and Dormant");
+    SetEnabled(false);
     std::printf("%d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

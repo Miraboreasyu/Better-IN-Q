@@ -45,14 +45,19 @@ void RequestRestart(const Config& cfg);
 
 // 面板主动选择时请求立即换装备，不重开、不套道具、不改猫饭/任务。
 // 只排队，不在调用线程写游戏；后一次覆盖前一次。空/无效值清掉旧的立即待办。
-// true = 编号已接受或空选择已取消，false = 无效编号/未 Ready/卸载态。
+// true = 编号已接受或空选择已取消，false = 无效编号/未 Ready/卸载态/非明确安全据点。
+// 仅 stage 1 且明确不在读盘时排装备；局内、调查、未知与加载均拒绝。
+// 游戏线程消费时再次校验安全状态，失效则取消，避免据点排队后进局才执行。
 // 游戏线程下一次匹配 ApplyResetAndEquip UI 调用且非读盘、对象链有效时提交；
 // 若尚未到该落点会继续等待。正在重开时不插队，RequestRestart 会清掉旧立即待办。
 // Config 及调用方的 Model 仍由主循环现有锁保护；不要从渲染线程直接调用。
 // 调用方只应响应显式选择事件；切 profile/slot/载入配置不要自动调用，需 CancelPending。
 // SetEnabled(false) 会排空发布者/回调并清队列，重新启用不会补做卸载态的选择。
 bool RequestEquipApply(const Config& cfg, const std::string& equip);
-// activeSet 为空/不存在/未指定装备时，相当于传空串：不脱装备，仅取消未提交的立即待办。
+// 安全据点沿用上述仅装备行为；明确局内/探索且不在加载时仅排道具+联动快捷栏，
+// 未知/加载拒绝并取消本次待办，消费前再验同一状态。重开原队列不受此限制。
+// 不排装备、不改猫饭或任务；worker 路径三语风险提示每进程仅一次。
+// activeSet 为空/不存在时仅取消未提交的立即装备待办，不脱装备。
 bool RequestActiveSetEquipApply(const Config& cfg);
 
 // 只重置（原 IN-Q 的 Reset only / INQ+6）：把当前任务重置掉、回据点，不接任务也不出发。
@@ -67,7 +72,8 @@ void Tick(const Config& cfg);
 int TakeEnteredQuest();
 
 // 把配置里的开关同步进状态（启动时和改配置后）
-void ApplyOptions(const Config& cfg);
+// 配置整体替换/切存档时 resetFood=true，避免继承旧档案的猫饭编号。
+void ApplyOptions(const Config& cfg, bool resetFood = false);
 
 // 装备/道具套装：配置里写的是编号或游戏里的名字，这里解析成编号（0 = 找不到）
 int ResolveEquip(const std::string& s);

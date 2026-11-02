@@ -1,4 +1,4 @@
-Better-IN-Q v0.7.3
+Better-IN-Q v0.7.3.1
 面板操作说明 / Panel Guide
 =========================
 
@@ -25,6 +25,7 @@ L3 / R3 表示按下左 / 右摇杆。手柄按键名称采用 Xbox 标识。
 · 向左移动到内容边缘后进入左侧栏，上下选择页面，向右返回内容。
 · 鼠标左键：点击操作；鼠标滚轮：滚动列表。
 · 输入框支持中文、英文和日文输入。
+· 重复性警告按类型每次启动游戏仅提示一次；导入、导出和超时恢复结果仍会逐次反馈。
 · 面板底部显示当前页面的可用操作，并随最近使用的手柄、键盘或鼠标自动切换；编辑、排序和弹窗中会显示对应提示。
 
 打开面板后，默认选中主页的「重开」，直接按 A 即可重开。
@@ -63,7 +64,8 @@ L3 / R3 表示按下左 / 右摇杆。手柄按键名称采用 Xbox 标识。
 「联动快捷栏」用于同时切换所选道具套装关联的快捷栏。
 游戏内修改装备或道具套装名称后，面板列表会自动更新。
 
-套用后，装备会尽快更换；读盘或重开过程中可能稍后才换上。
+据点中套用后可更换装备；任务或探索中切换仅更换道具，不动装备和猫饭。局内如需换装备，请自行前往帐篷。
+读盘或状态未就绪时不提交这次切换，请等画面稳定后重选。
 道具、猫饭和任务在之后重开或进入任务时按选择生效。
 编辑已套用套装的装备选项，也会请求更换装备。
 编辑页的「确认 / 确认并套用」会套用这套预设并返回列表。
@@ -162,6 +164,7 @@ Inside the panel:
 · Move left past the content edge to enter the sidebar. Move up or down to choose a page, then right to return to its content.
 · Left mouse button: click to interact. Mouse wheel: scroll lists.
 · Text fields support Chinese, English and Japanese input.
+· Repetitive warnings appear once per type per game launch. Import, export and timeout-recovery results are still reported for each operation.
 · The panel footer shows the actions available in the current context and automatically switches to the controller, keyboard or mouse you last used. Editing, sorting and popups have their own hints.
 
 The panel opens with Restart selected on the home page. Press A to restart immediately.
@@ -200,7 +203,8 @@ Focus or hover a meal option to preview health, stamina and the three abbreviate
 Link shortcut bar also switches to the shortcut bar associated with the selected item loadout.
 Equipment and item loadout names update automatically after you rename them in the game.
 
-Applying a loadout changes equipment as soon as possible. During loading or a restart, the change may wait until later.
+Equipment can be changed at base. During quests or expeditions, selecting a loadout changes only its items, not equipment or meals. Use the tent to change equipment.
+During loading or an unknown game state, this change is not submitted. Select again once the game is ready.
 Items, meals and quests take effect on a subsequent restart or quest entry, as appropriate.
 Changing the equipment option of the active loadout also requests an equipment change.
 The editor's OK / apply button applies that loadout and returns to the list.

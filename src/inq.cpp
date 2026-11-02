@@ -13,6 +13,7 @@
 #include "hook.h"
 #include "i18n.h"
 #include "log.h"
+#include "chat_once.h"
 #include "restart_watchdog.h"
 
 #include <windows.h>
@@ -59,6 +60,32 @@ std::atomic<int> g_enteredQuest{0};
 // 主循环发布，游戏线程消费；后一次选择覆盖前一次，0 取消尚未提交的请求。
 std::atomic<int> g_pendingEquipApply{0};
 int g_enteredSeen = 0;   // 只在游戏线程里读写
+// Process lifetime: cancellation, slot switches and Dormant must not reset this.
+bool g_warnedUnsafeEquip = false;
+std::atomic<bool> g_deferredUnsafeEquipWarning{false};
+bool g_haveFoodOption = false;
+int g_lastFoodOption = 0;
+
+// Fail closed: InScene also includes hubs and is not a quest-state classifier.
+// 0xD is exploration, not a proven safe equipment-apply context.
+bool SafeImmediateEquip()
+{
+    const std::uintptr_t q = P(pQuest);
+    const std::uintptr_t ui = Ui();
+    const std::uintptr_t load = ui ? P(ui + 0x20) : 0;
+    return q && Readable(q + 0x38, 4) && Rd<std::uint32_t>(q + 0x38) == 1 &&
+           load && Readable(load + 0x1D04, 4) && Rd<std::uint32_t>(load + 0x1D04) == 0;
+}
+
+// Worker request paths only; never invoke the game's chat function in a hook.
+void WarnUnsafeEquipOnce()
+{
+    if (g_warnedUnsafeEquip) return;
+    g_warnedUnsafeEquip = true;
+    ChatOnce(ChatNotice::UnsafeEquip, i18n::Tr("因局内换装备有炸房风险，仅更换道具套装；如需更换装备，请自行前往帐篷。",
+                  "Changing equipment during a quest can crash the session; only the item loadout will change. To change equipment, please use a tent.",
+                  "クエスト中の装備変更はセッションがクラッシュする恐れがあるため、アイテムセットのみ変更します。装備を変更する場合はテントをご利用ください。"));
+}
 
 enum MsgBit : std::uint32_t { kMsgEquip = 1, kMsgQuest = 2, kMsgCant = 4, kMsgWindow = 8, kMsgNoQuest = 16 };
 
@@ -86,6 +113,13 @@ void OnApplyResetAndEquip(Ctx* c)
     if (g.equipLoadout == 0 && g.restart == 0) {
         immediate = g_pendingEquipApply.load(std::memory_order_acquire);
         if (immediate != 0) {
+            // A hub-side request may reach this callback only after quest entry.
+            // Cancel it rather than carrying an unsafe selection back to a hub.
+            if (!SafeImmediateEquip()) {
+                if (g_pendingEquipApply.compare_exchange_strong(immediate, 0, std::memory_order_acq_rel))
+                    g_deferredUnsafeEquipWarning.store(true, std::memory_order_release);
+                return;
+            }
             const std::uintptr_t ui = Ui();
             const std::uintptr_t load = ui ? P(ui + 0x20) : 0;
             const std::uintptr_t slot = SaveSlot();
@@ -434,7 +468,7 @@ bool Install(const Config& cfg, std::string& report)
 
 // 面板上「现在到底是哪份」按这套算：套装自己指定了就用套装的，否则用全局的。
 // 界面和实际写入都用这个，避免出现「显示的是 A，吃进去的是 B」。
-void ApplyOptions(const Config& cfg)
+void ApplyOptions(const Config& cfg, bool resetFood)
 {
     // 禁用先关总闸并排空回调；启用则在所有选项发布完整之后最后开闸。
     if (!cfg.enabled) SetEnabled(false);
@@ -442,10 +476,16 @@ void ApplyOptions(const Config& cfg)
     g.optAcceptOnly = cfg.acceptOnly ? 1 : 0;
     g.optWyvern = cfg.wyvern ? 1 : 0;
     g.questId = (std::uint32_t)cfg.questId;   // 0 = 用上一次的任务（QuestLoad 里会去读）
-    g.food = cfg.food;
-    // 当前套用的这套本身带了猫饭/任务的话，生效值就是它的那份（面板显示的也是这个）
+    const bool safeEquip = SafeImmediateEquip();
+    const bool manualFoodChange = resetFood || !g_haveFoodOption || cfg.food != g_lastFoodOption;
+    // reqSave calls ApplyOptions after an active-set selection. In a quest it
+    // must not silently replace the effective meal with the new set's meal.
+    // A deliberate change to the global meal is independent and remains valid.
+    if (safeEquip || manualFoodChange) g.food = cfg.food;
+    g_haveFoodOption = true;
+    g_lastFoodOption = cfg.food;
     if (const LoadoutSet* s = cfg.FindSetById(cfg.activeSet)) {
-        if (s->food > 0) g.food = s->food;
+        if (safeEquip && s->food > 0) g.food = s->food;
         if (gamedata::ValidQuestId(s->quest)) g.questId = (std::uint32_t)s->quest;
     }
     if (cfg.enabled) SetEnabled(true);
@@ -542,6 +582,19 @@ int ResolveItem(const std::string& s)
 // ---------------------------------------------------------------------------
 namespace {
 int g_pendingSetItem = 0;
+bool g_immediateSetItem = false; // worker-owned; distinguishes restart QueueSet
+std::uint32_t g_immediateItemStage = 0;
+
+bool ItemSelectionContext(std::uint32_t& stage)
+{
+    const auto q = P(pQuest);
+    if (!q || !Readable(q + 0x38, 4)) return false;
+    stage = Rd<std::uint32_t>(q + 0x38);
+    const auto ui = Ui();
+    const auto load = ui ? P(ui + 0x20) : 0;
+    return (stage == 2 || stage == 0xD) && load &&
+           Readable(load + 0x1D04, 4) && Rd<std::uint32_t>(load + 0x1D04) == 0;
+}
 bool g_pendingLink = false;
 bool g_hasPendingLink = false;
 int g_savedRadial = -1;                 // CT 的 wassetting：套道具前「联动快捷栏」原来的值
@@ -597,6 +650,8 @@ void ClearPendingAfterDrain()
     g.itemLoadout = 0;
     g_pendingEquipApply.store(0, std::memory_order_release);
     g_pendingSetItem = 0;
+    g_immediateSetItem = false;
+    g_deferredUnsafeEquipWarning.store(false, std::memory_order_release);
     g_pendingLink = false;
     g_hasPendingLink = false;
     g.message = 0;
@@ -637,12 +692,17 @@ void SetEnabled(bool enabled)
 // 道具由下一次 Tick 发 UI 命令，猫饭在下次读盘时写。
 void QueueSet(const LoadoutSet& s)
 {
+    if (g_immediateSetItem) {
+        g_pendingSetItem = 0;
+        g_hasPendingLink = false;
+        g_immediateSetItem = false;
+    }
     const int e = ResolveEquip(s.equip);
     const int it = ResolveItem(s.item);
-    if (!s.equip.empty() && !e) Chat(i18n::Fmt(i18n::Tr("Better-IN-Q：装备套装「%s」找不到（旧版按名字存的请在套装页重选）",
+    if (!s.equip.empty() && !e) ChatOnce(ChatNotice::MissingEquip, i18n::Fmt(i18n::Tr("Better-IN-Q：装备套装「%s」找不到（旧版按名字存的请在套装页重选）",
                                                        "Better-IN-Q: loadout \"%s\" not found (old name-based configs need re-picking)",
                                                        "Better-IN-Q：装備セット「%s」が見つかりません（旧形式の設定は選び直してください）"), s.equip.c_str()));
-    if (!s.item.empty() && !it) Chat(i18n::Fmt(i18n::Tr("Better-IN-Q：道具套装「%s」找不到（旧版按名字存的请在套装页重选）",
+    if (!s.item.empty() && !it) ChatOnce(ChatNotice::MissingItem, i18n::Fmt(i18n::Tr("Better-IN-Q：道具套装「%s」找不到（旧版按名字存的请在套装页重选）",
                                                        "Better-IN-Q: item loadout \"%s\" not found (old name-based configs need re-picking)",
                                                        "Better-IN-Q：アイテムセット「%s」が見つかりません（旧形式の設定は選び直してください）"), s.item.c_str()));
     if (e) g.equipLoadout = e;
@@ -658,14 +718,38 @@ bool RequestEquipApply(const Config& cfg, const std::string& equip)
     ActiveCall call;
     if (!call || !cfg.enabled || !g_ready) return false;
     const int n = equip.empty() ? 0 : ResolveEquip(equip);
+    if (n && !SafeImmediateEquip()) {
+        g_pendingEquipApply.store(0, std::memory_order_release);
+        WarnUnsafeEquipOnce();
+        return false;
+    }
     g_pendingEquipApply.store(n, std::memory_order_release);
     return equip.empty() || n != 0;
 }
 
 bool RequestActiveSetEquipApply(const Config& cfg)
 {
+    ActiveCall call;
+    if (!call || !cfg.enabled || !g_ready) return false;
+    if (g.restart != 0) return false; // never overwrite the intentional restart queue
+    if (g_immediateSetItem) {
+        g_pendingSetItem = 0;
+        g_hasPendingLink = false;
+        g_immediateSetItem = false;
+    }
     const LoadoutSet* s = cfg.activeSet > 0 ? cfg.FindSetById(cfg.activeSet) : nullptr;
-    return RequestEquipApply(cfg, s ? s->equip : std::string());
+    if (!s || SafeImmediateEquip()) return RequestEquipApply(cfg, s ? s->equip : std::string());
+    // Deliberate restart QueueSet is a different path: never alter its queued
+    // equipment here. Ordinary active-set selection in the field is item-only.
+    g_pendingEquipApply.store(0, std::memory_order_release);
+    WarnUnsafeEquipOnce();
+    if (!ItemSelectionContext(g_immediateItemStage)) return false;
+    const int item = s->item.empty() ? 0 : ResolveItem(s->item);
+    g_pendingSetItem = item;
+    g_immediateSetItem = item != 0;
+    g_pendingLink = s->linkRadial;
+    g_hasPendingLink = item != 0;
+    return s->item.empty() || item != 0;
 }
 
 void RequestRestart(const Config& cfg)
@@ -673,7 +757,7 @@ void RequestRestart(const Config& cfg)
     ActiveCall call;
     if (!call || !cfg.enabled) return;
     if (!g_ready) {
-        Chat(i18n::Tr("Better-IN-Q：重开功能没装上，详情见 BetterINQ.log",
+        ChatOnce(ChatNotice::CoreUnavailable, i18n::Tr("Better-IN-Q：重开功能没装上，详情见 BetterINQ.log",
                       "Better-IN-Q: the restart hook did not install, see BetterINQ.log",
                       "Better-IN-Q：再開機能を組み込めませんでした。BetterINQ.log を見てください"));
         return;
@@ -683,7 +767,7 @@ void RequestRestart(const Config& cfg)
     g_pendingEquipApply.store(0, std::memory_order_release);
     if (cfg.activeSet > 0) {
         if (const LoadoutSet* s = cfg.FindSetById(cfg.activeSet)) QueueSet(*s);
-        else Chat(i18n::Fmt(i18n::Tr("Better-IN-Q：配置里没有编号 %d 的全套",
+        else ChatOnce(ChatNotice::MissingActiveSet, i18n::Fmt(i18n::Tr("Better-IN-Q：配置里没有编号 %d 的全套",
                                      "Better-IN-Q: no loadout #%d in the config",
                                      "Better-IN-Q：設定にセット番号 %d がありません"), cfg.activeSet));
     }
@@ -698,7 +782,7 @@ void RequestResetOnly()
     ActiveCall call;
     if (!call) return;
     if (!g_ready) {
-        Chat(i18n::Tr("Better-IN-Q：重开功能没装上，详情见 BetterINQ.log",
+        ChatOnce(ChatNotice::CoreUnavailable, i18n::Tr("Better-IN-Q：重开功能没装上，详情见 BetterINQ.log",
                       "Better-IN-Q: the restart hook did not install, see BetterINQ.log",
                       "Better-IN-Q：再開機能を組み込めませんでした。BetterINQ.log を見てください"));
         return;
@@ -814,6 +898,13 @@ void Tick(const Config& cfg)
     // UiBase/UI disappears this must undo the preceding tick's temporary byte.
     RestoreRadial();
     if (!cfg.enabled) return;
+    if (g_deferredUnsafeEquipWarning.exchange(false, std::memory_order_acq_rel)) WarnUnsafeEquipOnce();
+    std::uint32_t itemStage = 0;
+    if (g_immediateSetItem && (!ItemSelectionContext(itemStage) || itemStage != g_immediateItemStage)) {
+        g_pendingSetItem = 0;
+        g_immediateSetItem = false;
+        g_hasPendingLink = false;
+    }
     const std::uintptr_t uib = P(pUiBase);
     if (!uib) return;
     const std::uintptr_t pui = P(uib + 0x278);
@@ -824,6 +915,7 @@ void Tick(const Config& cfg)
 
     // 道具套装（通过 UI 命令让游戏自己套用）
     if (g_pendingSetItem > 0 && slot && piui) {
+        g_immediateSetItem = false;
         const int n = g_pendingSetItem;                    // 显示编号（套用命令要它）
         g_pendingSetItem = 0;
         const int st = ItemStoreOfDisplay(slot, n);         // 数据真正在哪一格
@@ -850,7 +942,7 @@ void Tick(const Config& cfg)
             Wr<std::uint64_t>(uib + 0x8F60, 1);
             Log("item loadout %d 已提交（联动快捷栏 %d）", n, g_savedRadial == -1 ? -1 : (g_pendingLink ? 1 : 2));
         } else {
-            Chat(i18n::Fmt(i18n::Tr("Better-IN-Q：道具套装 %d 是空的",
+            ChatOnce(ChatNotice::EmptyItem, i18n::Fmt(i18n::Tr("Better-IN-Q：道具套装 %d 是空的",
                                     "Better-IN-Q: item loadout %d is empty",
                                     "Better-IN-Q：アイテムセット %d は空です"), n));
         }
@@ -884,19 +976,19 @@ void Tick(const Config& cfg)
     const std::uint32_t m = g.message;
     if (m) {
         g.message = 0;
-        if (m & kMsgEquip) Chat(i18n::Tr("Better-IN-Q：这个装备套装是空的或无效",
+        if (m & kMsgEquip) ChatOnce(ChatNotice::InvalidEquip, i18n::Tr("Better-IN-Q：这个装备套装是空的或无效",
                                          "Better-IN-Q: that loadout is empty or invalid",
                                          "Better-IN-Q：その装備セットは空か無効です"));
-        if (m & kMsgQuest) Chat(i18n::Tr("Better-IN-Q：接任务失败（没选过任务？）",
+        if (m & kMsgQuest) ChatOnce(ChatNotice::QuestAcceptFailed, i18n::Tr("Better-IN-Q：接任务失败（没选过任务？）",
                                          "Better-IN-Q: could not accept the quest (no quest picked yet?)",
                                          "Better-IN-Q：クエストを受けられませんでした（まだ選んでいませんか？）"));
-        if (m & kMsgCant) Chat(i18n::Tr("Better-IN-Q：现在不能重开",
+        if (m & kMsgCant) ChatOnce(ChatNotice::CannotRestart, i18n::Tr("Better-IN-Q：现在不能重开",
                                         "Better-IN-Q: cannot restart right now",
                                         "Better-IN-Q：今は再開できません"));
-        if (m & kMsgWindow) Chat(i18n::Tr("Better-IN-Q：请先关闭所有窗口",
+        if (m & kMsgWindow) ChatOnce(ChatNotice::CloseWindows, i18n::Tr("Better-IN-Q：请先关闭所有窗口",
                                           "Better-IN-Q: close all windows first",
                                           "Better-IN-Q：先にすべてのウィンドウを閉じてください"));
-        if (m & kMsgNoQuest) Chat(i18n::Tr("Better-IN-Q：现在不在任务里，没有可重置的",
+        if (m & kMsgNoQuest) ChatOnce(ChatNotice::NoQuest, i18n::Tr("Better-IN-Q：现在不在任务里，没有可重置的",
                                            "Better-IN-Q: not in a quest, nothing to reset",
                                            "Better-IN-Q：クエスト中ではないのでリセットできません"));
     }
