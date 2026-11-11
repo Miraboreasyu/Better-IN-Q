@@ -51,6 +51,13 @@ int main()
     CHECK(c.hkRestart == "LT+RT+L3+R3 | Delete", "默认重开键 = %s", c.hkRestart.c_str());
     CHECK(c.hkPanel == "LB+LT+X | Insert", "默认面板键 = %s", c.hkPanel.c_str());
     CHECK(c.hkResetOnly == "LB+RB+L3+R3 | Home", "默认只重置键 = %s", c.hkResetOnly.c_str());
+    CHECK(!c.palicoEnabled, "随从套装功能默认关闭");
+    c.palicoEnabled = true;
+    std::string global, slot;
+    SerializeConfigParts(c, global, slot);
+    Config roundtrip;
+    CHECK(ParseConfigText(global + slot, roundtrip, err) && roundtrip.palicoEnabled,
+          "随从开关按全局配置往返保存");
     CHECK(c.enabled && !c.reset && !c.acceptOnly && !c.wyvern && c.quickBlackout, "默认功能开关");
     CHECK(c.panelOpacity == 75 && c.language == "zh" && c.hdr == "auto" && c.sdrNits == 203,
           "默认面板：不透明度 75、中文、HDR auto、SDR 白点 203");
@@ -550,6 +557,21 @@ int main()
         ::DeleteFileW(emptyPanel.c_str());
     }
 
+    {
+        Config before; LoadoutSet set; set.id = 19;
+        set.palicoDeploy = 0; set.palicoLevel = 50; set.palicoGadget = 5; set.palicoGadgetLevel = 15;
+        before.sets.push_back(set);
+        std::string global, slot, error;
+        SerializeConfigParts(before, global, slot);
+        Config after;
+        CHECK(ParseConfigText(global + slot, after, error) && after.sets.size() == 1 &&
+              after.sets[0].palicoDeploy == 0 && after.sets[0].palicoLevel == 50 &&
+              after.sets[0].palicoGadget == 5 && after.sets[0].palicoGadgetLevel == 15, "Palico per-loadout fields roundtrip");
+        CHECK(global.find("PalicoDeploy") == std::string::npos, "Palico options never become global settings");
+        CHECK(ParseConfigText("[Set.1]\nName=legacy\n", after, error) && after.sets[0].palicoDeploy == -1 &&
+              after.sets[0].palicoLevel == 0 && after.sets[0].palicoGadget == -1 && after.sets[0].palicoGadgetLevel == 0,
+              "legacy loadouts leave every Palico field unchanged");
+    }
     std::printf("\n%s（%d 项失败）\n", g_fail ? "有失败" : "全部通过", g_fail);
     return g_fail ? 1 : 0;
 }

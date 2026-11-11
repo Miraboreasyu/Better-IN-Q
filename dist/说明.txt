@@ -1,4 +1,4 @@
-Better-IN-Q v0.7.3.1
+Better-IN-Q v0.7.4
 面板操作说明 / Panel Guide
 =========================
 
@@ -13,6 +13,7 @@ Better-IN-Q v0.7.3.1
 打开 / 关闭面板：手柄 LB + LT + X，或键盘 Insert。
 重开任务：手柄 LT + RT + L3 + R3，或键盘 Delete。
 只重置任务：手柄 LB + RB + L3 + R3，或键盘 Home。
+补满道具数量：默认关闭；在设置页打开「允许补满道具快捷键」后，键盘 F6 生效（可改成手柄组合或清空）。
 L3 / R3 表示按下左 / 右摇杆。手柄按键名称采用 Xbox 标识。
 
 面板内：
@@ -65,11 +66,23 @@ L3 / R3 表示按下左 / 右摇杆。手柄按键名称采用 Xbox 标识。
 游戏内修改装备或道具套装名称后，面板列表会自动更新。
 
 据点中套用后可更换装备；任务或探索中切换仅更换道具，不动装备和猫饭。局内如需换装备，请自行前往帐篷。
+据点、任务或探索中切换道具套装后，会把这套里已被消耗的道具数量补回套装记录的数量；只补这套自身列出的格子，不动其它道具，也不改写道具种类。
+打开开关后，随时按补满道具快捷键（默认 F6）也会对当前道具套装做同样的补全；丢空的格子会按套装补回道具和数量，袋里放着别的道具的格子不会被覆盖。
 读盘或状态未就绪时不提交这次切换，请等画面稳定后重选。
 道具、猫饭和任务在之后重开或进入任务时按选择生效。
 编辑已套用套装的装备选项，也会请求更换装备。
 编辑页的「确认 / 确认并套用」会套用这套预设并返回列表。
 只想修改内容、不想套用时，编辑后直接返回即可。
+
+随从猫功能在设置页开启，默认关闭；关闭时套装编辑页不显示随从选项，也不会执行随从修改。
+开启后，编辑页下方可设置这套的随从猫：是否出战、随从等级、随从装备套装与道具等级；「不改」表示这一项不动。
+等级数字按 A / 回车开始调整，上下 ±1、左右 ±10，按 B / Esc 结束；鼠标点击上下箭头调整 1 级。
+随从装备列表顶部是「不使用」，其余仅显示游戏中真实非空的套装名称。
+随从猫的修改只在据点、重开时应用，任务与探索中一律跳过。
+改等级会写入存档：重开前先整份备份到 BetterINQ\backups\palico\*.biqbak，备份或复核失败就不重开。
+「只重置」返回据点后会把本轮的等级和出战状态写回原值。
+随从装备套装整套换上，携带道具也在其中；应用时用游戏自己的套用逻辑，游戏里不弹菜单、不动光标位置。
+随从猫歌曲不做改动。
 
 取消套用不会把已经穿上的装备换回去。
 编辑页也可取消套用或删除该套装；删除前会弹出确认卡片，默认选中「取消」。
@@ -79,6 +92,13 @@ L3 / R3 表示按下左 / 右摇杆。手柄按键名称采用 Xbox 标识。
 ----------
 选择「新建猫饭」，设置体力、耐力、攻击、防御、属性耐性和三个猫饭技能。
 列表会显示预设内容，方便直接比较。
+
+食堂每顿必定给耐力 +50，所以耐力不再单独给选项；数值留 0、技能全空的预设当作「清空猫饭」，
+不参与判定（耐力也照 0 写）。其余情况在编辑页底部提示（按 speedrun_util 的判定）：
+· 数值超出食堂范围、同一组技能选了两个、技能 50 与 43 同时出现，或需要的食材超过 6 个。
+· 合法的不显示任何东西；要靠当天每日技能的也按合法处理，不提示。
+· 列表行和猫饭预览会在行首用红色感叹号标出这类预设；编辑页底部说明具体原因。
+· 这只是提示，不会拦着保存。
 
 列表操作与套装页一致：
 · A / 空格 / 回车 / 鼠标左键：选用，再操作一次取消。
@@ -151,6 +171,7 @@ Open the panel once the title screen is ready. It remains available during later
 Open / close panel: LB + LT + X on a controller, or Insert on the keyboard.
 Restart quest: LT + RT + L3 + R3, or Delete.
 Reset quest only: LB + RB + L3 + R3, or Home.
+Refill items: off by default; enable “Allow the refill hotkey” in Settings, then F6 works (rebindable or clearable).
 L3 / R3 mean pressing the left / right stick. Controller labels use the Xbox layout.
 
 Inside the panel:
@@ -206,9 +227,21 @@ Equipment and item loadout names update automatically after you rename them in t
 Equipment can be changed at base. During quests or expeditions, selecting a loadout changes only its items, not equipment or meals. Use the tent to change equipment.
 During loading or an unknown game state, this change is not submitted. Select again once the game is ready.
 Items, meals and quests take effect on a subsequent restart or quest entry, as appropriate.
+Switching an item loadout (at base, in a quest or on an expedition) refills the counts of that loadout's own items back to the amounts stored in it; other slots and item kinds are untouched.
+With that switch on, the refill hotkey (F6 by default) does the same for the active item loadout at any time; slots you emptied are refilled with that loadout's item and count, while slots holding a different item are never overwritten.
 Changing the equipment option of the active loadout also requests an equipment change.
 The editor's OK / apply button applies that loadout and returns to the list.
 To edit without applying, make your changes and go back instead.
+
+Palico support is enabled in Settings and is off by default. While disabled, no Palico controls appear in the loadout editor and no Palico changes are applied.
+Once enabled, the editor sets deployment, Palico level, palico equipment loadout and gadget level; "Unchanged" keeps the current value.
+Press A / Enter on a level to adjust it: Up/Down changes 1, Left/Right changes 10, and B / Esc finishes. Mouse chevrons change 1.
+The equipment list starts with "Do not use" and then shows only real, non-empty in-game loadout names.
+Palico changes are applied only at base on restart and are skipped during quests and expeditions.
+Level changes write save data: the whole slot is backed up to BetterINQ\backups\palico\*.biqbak before restart, and restart is cancelled if the backup or verification fails.
+Reset-only restores this round's levels and deployment after returning to base.
+The palico loadout applies the whole set, gadget included, using the game's own apply path without opening a menu or moving the menu cursor.
+Palico songs are left alone.
 
 Stopping a loadout does not restore your previous equipment.
 You can also stop applying or delete a loadout from its editor. A confirmation card defaults to Cancel.
@@ -218,6 +251,13 @@ B / Esc or Cancel only closes the card; select and confirm the red Delete button
 -------------
 Choose New meal to set health, stamina, attack, defense, elemental resistance and three food skills.
 Each list entry shows its preset details for easy comparison.
+
+A vanilla canteen meal always gives stamina +50, so stamina has no option. A preset with all values 0 and no skills counts as "clear the meal" and is not checked (it writes 0 for stamina as well).
+The editor footer explains when the preset cannot be served, judged the way speedrun_util does:
+- values outside the canteen range, two skills from the same group, skills 50 and 43 together, or more than 6 ingredients needed;
+- legal presets show nothing, and presets that rely on that day's daily skill also count as legal and show nothing;
+- the meal list and the preview mark those presets with a red exclamation mark at the start of the row.
+These are hints only and never block saving, so hand-made non-vanilla meals still work.
 
 List controls are the same as on the Loadouts page:
 · A / Space / Enter / left-click: select a preset; activate it again to clear the selection.

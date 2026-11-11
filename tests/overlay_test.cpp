@@ -565,6 +565,24 @@ int wmain(int argc, wchar_t** argv)
             shot(L"overlay_story_1080_zh_pad_edit.png");
             CHECK(ui::DebugPage() == 3 && ui::DebugHintItems() != normalItems,
                   "real Y enters editor with editor-specific hints");
+            {
+                const Config beforePalicoStory = g_cfg;
+                const auto beforePalicoNames = g_model.palicoNames;
+                g_cfg.palicoEnabled = true;
+                g_model.palicoNames = {{2, "Mikan Hammer", 2}, {7, "Coral Orchestra", 7}};
+                auto& palicoSet = g_cfg.sets.front();
+                palicoSet.palicoLevel = 10;
+                palicoSet.palicoGadgetLevel = 15;
+                palicoSet.palicoLoadout = 7;
+                for (int n = 0; n < 6; ++n) pressAtlas(ImGuiKey_GamepadDpadDown);
+                pressAtlas(ImGuiKey_GamepadFaceDown);
+                pressAtlas(ImGuiKey_GamepadDpadRight);
+                CHECK(palicoSet.palicoLevel == 20 && ui::DebugPage() == 3,
+                      "overlay real gamepad adjusts Palico level by +10");
+                shot(L"overlay_story_1080_zh_pad_palico_controls.png");
+                g_cfg = beforePalicoStory;
+                g_model.palicoNames = beforePalicoNames;
+            }
             ui::DebugOpenDelete();
             for (int n = 0; n < 12; ++n) frame(0.25f, 0.35f, 0.25f);
             shot(L"overlay_story_1080_zh_pad_delete.png");
@@ -599,6 +617,17 @@ int wmain(int argc, wchar_t** argv)
             pressAtlas(ImGuiKey_GamepadFaceRight);
             pressAtlas(ImGuiKey_GamepadFaceUp);
             CHECK(ui::DebugPage() == 5, "actual food Y enters meal editor after LS finish");
+            // 合法性提示：故意摆一份食堂做不出的（勇气 3 级 + 忍耐 3 级 = 要 12 个食材）。
+            {
+                auto& bad = g_cfg.foods[41];
+                bad.hp = 5; bad.stamina = 2; bad.attack = 3; bad.defense = 0; bad.elemRes = 0;
+                bad.skill[0] = 29; bad.skill[1] = 32; bad.skill[2] = -1;
+                for (int n = 0; n < 3; ++n) frame(0.25f, 0.35f, 0.25f);
+                shot(L"overlay_story_1080_zh_pad_meal_legality.png");
+                pressAtlas(ImGuiKey_GamepadFaceRight);   // 回列表：看红色感叹号
+                for (int n = 0; n < 4; ++n) frame(0.25f, 0.35f, 0.25f);
+                shot(L"overlay_story_1080_zh_pad_food_illegal.png");
+            }
             g_cfg.sets[0].food = 41;
             for (int fid : {41, 73}) {
                 auto& food = g_cfg.foods[fid]; food.hp = 5; food.stamina = 2;

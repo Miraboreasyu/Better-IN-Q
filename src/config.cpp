@@ -100,6 +100,10 @@ std::string Render(const Config& c)
     o += kv("AcceptOnly", num(c.acceptOnly), i18n::Tr("1 = 只接任务，不出发",
                                                       "1 = accept the quest but do not depart",
                                                       "1 = 受注のみ、出発しない"));
+    o += kv("PalicoEnabled", num(c.palicoEnabled), "0 = disable optional Palico loadout overrides");
+    o += kv("RefillHotkey", num(c.refillHotkey), i18n::Tr("1 = 允许手动补满道具快捷键（默认 0，防误触）",
+                                                         "1 = allow the manual item-refill hotkey (default 0)",
+                                                         "1 = アイテム補充ホットキーを有効化（既定 0）"));
     o += kv("WyvernStart", num(c.wyvern), i18n::Tr("1 = 普通地图用翼龙起始",
                                                    "1 = start normal maps with the wingdrake",
                                                    "1 = 通常マップは翼竜で開始"));
@@ -153,6 +157,8 @@ std::string Render(const Config& c)
             i18n::Tr("窗口销毁后若进程还不退出，10 秒后主动结束（默认 1；排查退出问题时可以设 0）",
                      "End the process 10s after the window is gone if it has not exited (default 1)",
                      "ウィンドウが消えて 10 秒後も終了しない場合にプロセスを終了（既定 1）"));
+    o += kv("PalicoProbe", c.debugPalicoProbe ? "1" : "0",
+             i18n::Tr("随从装备探针（只写日志）", "palico apply probe (log only)", "オトモ装備プローブ（ログのみ）"));
     o += kv("MealProbe", c.debugMealProbe ? "1" : "0",
         i18n::Tr("1 = 只记录猫饭那片内存的变化、不写进去（排查用）",
                  "1 = only log the meal memory block, never write",
@@ -177,6 +183,9 @@ std::string Render(const Config& c)
     o += kv("ResetOnly", c.hkResetOnly, i18n::Tr("只重置任务（不接任务、不出发），留空 = 用面板上的按钮",
                                                   "Reset the quest only (no accept, no depart); empty = use the panel button",
                                                   "クエストのリセットのみ（受注・出発なし）。空 = パネルのボタンを使う"));
+    o += kv("Refill", c.hkRefill, i18n::Tr("手动把当前道具套装的数量补满，留空 = 关闭",
+                                             "Manually refill the active item loadout's counts; empty = off",
+                                             "現在のアイテムセットの数量を手動で補充。空 = 無効"));
     o += i18n::Tr("\r\n; 全套：段名是编号；Equip 写装备套装编号，Item 写道具套装的存放格 \"#编号\"\r\n",
                   "\r\n; Loadout: the section name is the number; Equip takes the equip loadout number,\r\n"
                   "; Item takes the item loadout storage slot as \"#number\"\r\n",
@@ -206,6 +215,11 @@ std::string Render(const Config& c)
                                               "Meal number, -1 = use the global meal",
                                               "猫飯番号、-1 = 全体の猫飯を使う"));
         o += kv("Quest", num(s.quest), "");
+        o += kv("PalicoDeploy", num(s.palicoDeploy), "-1 unchanged, 0 standby, 1 deployed");
+        o += kv("PalicoLevel", num(s.palicoLevel), "0 unchanged, 1..50");
+        o += kv("PalicoGadget", num(s.palicoGadget), "-1 unchanged, 0..5");
+        o += kv("PalicoLoadout", num(s.palicoLoadout), "0 unchanged, 1..24 palico equipment loadout");
+        o += kv("PalicoGadgetLevel", num(s.palicoGadgetLevel), "0 unchanged, 1..15");
         o += "\r\n";
     }
     o += i18n::Tr("; 猫饭：HP 0~5（+0~+50） Stamina 0~2（+0/+25/+50） Attack/Defense/ElemRes 0~3（无/小/中/大）"
@@ -627,6 +641,8 @@ bool ParseConfigText(const std::string& text, Config& cfg, std::string& err)
             else if (k == "Reset") cfg.reset = Bool(v);
             else if (k == "AcceptOnly") cfg.acceptOnly = Bool(v);
             else if (k == "WyvernStart") cfg.wyvern = Bool(v);
+            else if (k == "PalicoEnabled") cfg.palicoEnabled = Bool(v);
+            else if (k == "RefillHotkey") cfg.refillHotkey = Bool(v);
             else if (k == "ActiveSet") cfg.activeSet = n > 0 ? n : -1;
             else if (k == "Food") cfg.food = n > 0 ? n : -1;
             else if (k == "NextSetId") cfg.nextSetId = n;
@@ -651,6 +667,7 @@ bool ParseConfigText(const std::string& text, Config& cfg, std::string& err)
         } else if (sec == "Debug") {
             if (k == "Disable") cfg.debugDisable = v;
             else if (k == "ForceQuit") cfg.debugForceQuit = Bool(v);
+            else if (k == "PalicoProbe") cfg.debugPalicoProbe = Bool(v);
             else if (k == "MealProbe") cfg.debugMealProbe = Bool(v);
     else if (k == "NoWndHook") cfg.debugNoWndHook = Bool(v);
             else Log("ini: [Debug] 里不认识的键 %s（拼写对吗？）", k.c_str());
@@ -658,6 +675,7 @@ bool ParseConfigText(const std::string& text, Config& cfg, std::string& err)
             if (k == "Restart") cfg.hkRestart = v;
             else if (k == "Panel") cfg.hkPanel = v;
             else if (k == "ResetOnly") cfg.hkResetOnly = v;
+            else if (k == "Refill") cfg.hkRefill = v;
         } else if (curSet) {
             if (k == "Name") curSet->name = v;
             else if (k == "Equip") curSet->equip = v;
@@ -665,6 +683,11 @@ bool ParseConfigText(const std::string& text, Config& cfg, std::string& err)
             else if (k == "LinkRadial") curSet->linkRadial = Bool(v);
             else if (k == "Food") curSet->food = n > 0 ? n : -1;
             else if (k == "Quest") curSet->quest = n;
+            else if (k == "PalicoDeploy") curSet->palicoDeploy = n >= -1 && n <= 1 ? n : -1;
+            else if (k == "PalicoLevel") curSet->palicoLevel = n >= 1 && n <= 50 ? n : 0;
+            else if (k == "PalicoGadget") curSet->palicoGadget = n >= 0 && n <= 5 ? n : -1;
+            else if (k == "PalicoLoadout") curSet->palicoLoadout = n >= 0 && n <= 24 ? n : 0;
+            else if (k == "PalicoGadgetLevel") curSet->palicoGadgetLevel = n >= 1 && n <= 15 ? n : 0;
         } else if (curFood) {
             if (k == "Name") curFood->name = v;
             else if (k == "HP") curFood->hp = n;

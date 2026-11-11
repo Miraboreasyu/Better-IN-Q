@@ -90,7 +90,7 @@ bool Validate(const std::string& text, int mode, bool complete, Config& output, 
         if (section == "General") {
             const bool slot = In(k,"ActiveSet|Food|FoodOrder|NextSetId|NextFoodId");
             if ((mode == 0 && slot) || (mode == 1 && !slot)) return Fail(err,"INI key in wrong backup segment");
-            if (In(k,"Enabled|Reset|AcceptOnly|WyvernStart|QuickBlackout")) ok = In(v,"0|1|true|false|on|off|yes|no");
+            if (In(k,"Enabled|Reset|AcceptOnly|WyvernStart|QuickBlackout|PalicoEnabled|RefillHotkey")) ok = In(v,"0|1|true|false|on|off|yes|no");
             else if (In(k,"ActiveSet|Food")) ok = Number(v,-1,1000000) && (mode == 2 || v != "0");
             else if (In(k,"NextSetId|NextFoodId")) ok = Number(v,1,1000001);
             else if (k == "FoodOrder") ok = List(v,1,1000000);
@@ -102,9 +102,9 @@ bool Validate(const std::string& text, int mode, bool complete, Config& output, 
             else if (k == "Hdr") ok = In(v,"auto|off|scrgb|hdr10");
         } else if (section == "Debug") {
             if (k == "Disable") ok = v.size() <= 4096;
-            else if (In(k,"ForceQuit|MealProbe|NoWndHook")) ok = In(v,"0|1|true|false|on|off|yes|no");
+            else if (In(k,"ForceQuit|MealProbe|NoWndHook|PalicoProbe")) ok = In(v,"0|1|true|false|on|off|yes|no");
         } else if (section == "Hotkeys") {
-            ok = In(k,"Restart|Panel|ResetOnly") && v.size() <= 4096 && (k != "Panel" || !v.empty());
+            ok = In(k,"Restart|Panel|ResetOnly|Refill") && v.size() <= 4096 && (k != "Panel" || !v.empty());
         } else if (section.compare(0,4,"Set.") == 0) {
             if (k == "Name") ok = v.size() <= 4096;
             else if (k == "Equip") ok = v.empty() || Number(v,1,224);
@@ -112,6 +112,11 @@ bool Validate(const std::string& text, int mode, bool complete, Config& output, 
             else if (k == "LinkRadial") ok = In(v,"0|1|true|false|on|off|yes|no");
             else if (k == "Food") ok = Number(v,-1,1000000) && (mode == 2 || v != "0");
             else if (k == "Quest") ok = Number(v,0,INT_MAX);
+            else if (k == "PalicoDeploy") ok = Number(v,-1,1);
+            else if (k == "PalicoLevel") ok = Number(v,0,50);
+            else if (k == "PalicoGadget") ok = Number(v,-1,5);
+            else if (k == "PalicoLoadout") ok = Number(v,0,24);
+            else if (k == "PalicoGadgetLevel") ok = Number(v,0,15);
         } else {
             if (k == "Name") ok = v.size() <= 4096;
             else if (k == "HP") ok = Number(v,0,5);
@@ -221,7 +226,7 @@ bool Encode(const Snapshot& s,std::string& bytes,std::string& err) {
                Trim(v) == v && Value(v) == v;
     };
     for(const Config* c : {&s.global,&s.slots[0],&s.slots[1],&s.slots[2]}) {
-        if(!safe(c->hkRestart) || !safe(c->hkPanel) || !safe(c->hkResetOnly) || !safe(c->debugDisable))
+        if(!safe(c->hkRestart) || !safe(c->hkPanel) || !safe(c->hkResetOnly) || !safe(c->hkRefill) || !safe(c->debugDisable))
             return Fail(err,"Configuration text cannot be represented safely in INI");
         for(const auto& set:c->sets) if(!safe(set.name) || !safe(set.equip) || !safe(set.item))
             return Fail(err,"Loadout text cannot be represented safely in INI");

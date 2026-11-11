@@ -959,7 +959,7 @@ static void TestContextHints()
           !DisplayedHintContains("HJKL") && !DisplayedHintContains("Tab") &&
           DisplayedHintContains("F Rename"),
           "actual keyboard list retains rename alongside primary apply/edit and WASD");
-    CHECK(list.find("F rename") != std::string::npos && list.find("Ctrl + Up / Down") != std::string::npos &&
+    CHECK(list.find("F rename") != std::string::npos && list.find("Ctrl+Up/Down") != std::string::npos &&
           list.find("LB / RB") == std::string::npos, "keyboard row hints use real keyboard rename/reorder controls only");
     pad();
     CheckCompactFooter("gamepad list");
@@ -1261,6 +1261,109 @@ static void TestQuestSearchBoundary()
     }
     m = before; m.cfg = original; ui::OnOpen(m);
     for (int n = 0; n < 5; ++n) Frame();
+}
+
+// The feature is opt-in. Exercise the real page navigation, popup selection and
+// numeric edit mode rather than testing only the serialized configuration.
+static void TestPalicoControls()
+{
+    Config* const originalPtr = m.cfg;
+    const Config original = *originalPtr;
+    const auto originalNames = m.palicoNames;
+    Config cfg;
+    LoadoutSet set;
+    set.id = 41;
+    cfg.sets.push_back(set);
+    cfg.activeSet = -1;
+    m.cfg = &cfg;
+    m.palicoNames = {{2, "Alpha", 2}, {7, "Bravo", 7}};
+    auto openEdit = [&] {
+        ui::OnOpen(m);
+        ui::DebugGo(2, 0);
+        for (int n = 0; n < 5; ++n) Frame();
+        Press(ImGuiKey_GamepadFaceUp);
+        for (int n = 0; n < 3; ++n) Frame();
+        CHECK(ui::DebugPage() == 3, "Palico test enters the loadout editor");
+    };
+    auto down = [&](int count) { for (int n = 0; n < count; ++n) Press(ImGuiKey_GamepadDpadDown); };
+
+    cfg.palicoEnabled = false;
+    openEdit();
+    down(5);
+    Press(ImGuiKey_GamepadFaceDown);
+    CHECK(ui::DebugPage() == 2 && cfg.activeSet == 41,
+          "disabled Palico feature hides every Palico row and preserves confirm navigation");
+
+    cfg.palicoEnabled = true;
+    cfg.activeSet = -1;
+    openEdit();
+    down(7);
+    Press(ImGuiKey_GamepadFaceDown);
+    Press(ImGuiKey_GamepadDpadDown);
+    Press(ImGuiKey_GamepadFaceDown);
+    CHECK(cfg.sets[0].palicoLoadout == 2, "Palico popup selects the real sparse ID 2");
+    openEdit();
+    down(7);
+    Press(ImGuiKey_GamepadFaceDown);
+    Press(ImGuiKey_GamepadDpadDown);
+    Press(ImGuiKey_GamepadFaceDown);
+    CHECK(cfg.sets[0].palicoLoadout == 7, "Palico popup keeps sparse ID 7 rather than list index 2");
+    cfg.sets[0].palicoLoadout = 24;
+    openEdit();
+    down(7);
+    CHECK(cfg.sets[0].palicoLoadout == 24, "missing saved Palico ID is not silently remapped");
+    Press(ImGuiKey_GamepadFaceDown);
+    Press(ImGuiKey_GamepadDpadDown);
+    Press(ImGuiKey_GamepadFaceDown);
+    CHECK(cfg.sets[0].palicoLoadout == 2, "explicit replacement of a missing ID still selects Alpha");
+
+    cfg.sets[0].palicoLevel = 0;
+    openEdit();
+    down(6);
+    CHECK(ui::DebugHintText().find("调整等级") != std::string::npos, "Palico level row exposes adjustment hint");
+    Press(ImGuiKey_GamepadFaceDown);
+    Press(ImGuiKey_GamepadDpadDown);
+    CHECK(cfg.sets[0].palicoLevel == 0, "level adjustment clamps zero at the lower bound");
+    Press(ImGuiKey_GamepadDpadUp);
+    Press(ImGuiKey_GamepadDpadRight);
+    Press(ImGuiKey_GamepadDpadRight);
+    Press(ImGuiKey_GamepadDpadLeft);
+    Press(ImGuiKey_GamepadDpadDown);
+    CHECK(cfg.sets[0].palicoLevel == 10, "Palico level up/down is +/-1 and left/right is +/-10");
+    CHECK(ui::DebugHintText().find("结束调整") != std::string::npos, "numeric edit footer explains how to finish");
+    Press(ImGuiKey_GamepadFaceRight);
+    CHECK(ui::DebugPage() == 3 && cfg.sets[0].palicoLevel == 10,
+          "B exits numeric editing without returning to the loadout list");
+    down(1);
+    CHECK(cfg.sets[0].palicoLevel == 10 && ui::DebugPage() == 3,
+          "navigation resumes after B without applying another numeric delta");
+
+    cfg.sets[0].palicoLevel = 50;
+    openEdit();
+    down(6);
+    Press(ImGuiKey_GamepadFaceDown);
+    Press(ImGuiKey_GamepadDpadRight);
+    CHECK(cfg.sets[0].palicoLevel == 50, "Palico level adjustment clamps at 50");
+    Press(ImGuiKey_Escape);
+    CHECK(ui::DebugPage() == 3 && cfg.sets[0].palicoLevel == 50,
+          "Escape exits numeric editing without leaking to page back");
+
+    cfg.sets[0].palicoGadgetLevel = 15;
+    openEdit();
+    down(8);
+    Press(ImGuiKey_GamepadFaceDown);
+    Press(ImGuiKey_GamepadDpadRight);
+    CHECK(cfg.sets[0].palicoGadgetLevel == 15, "gadget level adjustment clamps at 15");
+    Press(ImGuiKey_GamepadDpadDown);
+    CHECK(cfg.sets[0].palicoGadgetLevel == 14, "gadget level supports the same numeric step controls");
+    Press(ImGuiKey_GamepadFaceRight);
+
+    *originalPtr = original;
+    m.cfg = originalPtr;
+    m.palicoNames = originalNames;
+    m.reqSave = false;
+    ui::OnOpen(m);
+    for (int n = 0; n < 3; ++n) Frame();
 }
 
 int main()
@@ -1605,21 +1708,21 @@ int main()
         selection.activeSet = -1;
         openList(2);
         Press(ImGuiKey_GamepadFaceUp);
-        for (int i = 0; i < 5; ++i) Press(ImGuiKey_GamepadDpadDown);
+        for (int i = 0; i < 5; ++i) Press(ImGuiKey_GamepadDpadDown);   // 默认关闭随从功能，保持原导航
         Press(ImGuiKey_GamepadFaceDown);
         CHECK(ui::DebugPage() == 2 && selection.activeSet == 41, "套装编辑确认：套用并回列表");
         Press(ImGuiKey_GamepadFaceUp);
-        for (int i = 0; i < 6; ++i) Press(ImGuiKey_GamepadDpadDown);
+        for (int i = 0; i < 6; ++i) Press(ImGuiKey_GamepadDpadDown);   // 默认关闭随从功能，保持原导航
         Press(ImGuiKey_GamepadFaceDown);
         CHECK(ui::DebugPage() == 2 && selection.activeSet == -1, "套装编辑取消套用：回列表并取消");
         selection.food = -1;
         openList(4);
         Press(ImGuiKey_GamepadFaceUp);
-        for (int i = 0; i < 8; ++i) Press(ImGuiKey_GamepadDpadDown);
+        for (int i = 0; i < 7; ++i) Press(ImGuiKey_GamepadDpadDown);   // 耐力那行没了
         Press(ImGuiKey_GamepadFaceDown);
         CHECK(ui::DebugPage() == 4 && selection.food == 7, "猫饭编辑确认：选择猫饭并回列表");
         Press(ImGuiKey_GamepadFaceUp);
-        for (int i = 0; i < 9; ++i) Press(ImGuiKey_GamepadDpadDown);
+        for (int i = 0; i < 8; ++i) Press(ImGuiKey_GamepadDpadDown);
         Press(ImGuiKey_GamepadFaceDown);
         CHECK(ui::DebugPage() == 4 && selection.food == -1, "猫饭编辑取消预设：回列表并取消");
         m.cfg = &cfg;
@@ -1674,7 +1777,7 @@ int main()
             Press(ImGuiKey_GamepadFaceDown);
             CHECK(meals.foods[id].hp == 1 && m.reqSave, "锁定猫饭 %d：修改内容仍请求保存", id);
             m.reqSave = false;
-            for (int i = 0; i < 8; ++i) Press(ImGuiKey_GamepadDpadDown);
+            for (int i = 0; i < 7; ++i) Press(ImGuiKey_GamepadDpadDown);
             Press(ImGuiKey_GamepadFaceDown);
             CHECK(ui::DebugPage() == 4 && meals.food == 3 && meals.sets[0].food == 1 && !m.reqSave,
                   "锁定猫饭 %d 编辑确认：回列表、保留全局和套装选择、不产生选择保存", id);
@@ -1686,7 +1789,7 @@ int main()
             ui::DebugGo(5, 2);
             for (int i = 0; i < 4; ++i) Frame();
             m.reqSave = false;
-            for (int i = 0; i < 8; ++i) Press(ImGuiKey_GamepadDpadDown);
+            for (int i = 0; i < 7; ++i) Press(ImGuiKey_GamepadDpadDown);
             Press(ImGuiKey_GamepadFaceDown);
             CHECK(ui::DebugPage() == 4 && meals.food == 2 && m.reqSave,
                   "未锁定（%s）：编辑确认仍选择猫饭并请求保存", activeSet ? "套装没带猫饭" : "没有套装");
@@ -1950,6 +2053,44 @@ int main()
         CHECK(scrolledBack < scrolledDown, "往上挪回来：列表往回滚（%.1f → %.1f）", scrolledDown, scrolledBack);
         CHECK(scrolledBack == base, "挪回第一行：滚动位置回到进移动模式时（%.1f → %.1f）", base, scrolledBack);
         Press(ImGuiKey_GamepadFaceRight);       // B 放下，别把状态带给后面的用例
+    }
+
+    // 猫饭页本身：单列列表按左右不能把焦点判空，否则之后上下只在当前可见的几行里打转。
+    {
+        cfg.sets.clear();
+        LoadoutSet one;
+        one.id = cfg.NextSetId();
+        one.name = "单";
+        cfg.sets.push_back(one);
+        cfg.activeSet = one.id;
+        cfg.foods.clear();
+        cfg.foodOrder.clear();
+        for (int i = 0; i < 18; ++i) {
+            const int n = cfg.AllocFoodId();
+            cfg.foods[n] = FoodPreset();
+            cfg.foodOrder.push_back(n);
+        }
+        ui::OnOpen(m);
+        for (int i = 0; i < 4; ++i) Frame();
+        ui::DebugGo(4, 0);
+        for (int i = 0; i < 6; ++i) Frame();
+        for (int i = 0; i < 6; ++i) { Press(ImGuiKey_GamepadDpadDown); Frame(); }
+        const int before = ui::DebugListFocusId();
+        Press(ImGuiKey_GamepadDpadRight);      // 列表里往右没有去处
+        Frame();
+        Press(ImGuiKey_GamepadDpadDown);
+        Frame();
+        CHECK(ui::DebugListFocusId() != before && ui::DebugListFocusId() != 0,
+              "猫饭页按右以后，上下仍然能在列表里继续走（%d → %d）", before, ui::DebugListFocusId());
+        const int afterRight = ui::DebugListFocusId();
+        Press(ImGuiKey_GamepadDpadLeft);       // 进侧栏再回来
+        Frame();
+        Press(ImGuiKey_GamepadDpadRight);
+        Frame();
+        Press(ImGuiKey_GamepadDpadDown);
+        Frame();
+        CHECK(ui::DebugListFocusId() != afterRight && ui::DebugListFocusId() != 0,
+              "猫饭页从侧栏回来后，上下仍然在列表里继续走（%d → %d）", afterRight, ui::DebugListFocusId());
     }
 
     // 换任务：点进去就得有任务能挑。分组全折叠时整页只有 7 个分组标题，手柄按下走几个就到底了，
@@ -2236,7 +2377,7 @@ int main()
         for (int i = 0; i < 4; ++i) Frame();
         ui::DebugGo(5, oldId);
         for (int i = 0; i < 4; ++i) Frame();
-        for (int i = 0; i < 9; ++i) Press(ImGuiKey_GamepadDpadDown);   // 档位与技能 → 确认 → 删除
+        for (int i = 0; i < 8; ++i) Press(ImGuiKey_GamepadDpadDown);   // 档位与技能 → 确认 → 删除（耐力行已去掉）
         Press(ImGuiKey_GamepadFaceDown);
         Frame();
         Press(ImGuiKey_GamepadDpadDown);                              // 确认框里的「删除」
@@ -2409,6 +2550,7 @@ int main()
         CHECK(ui::DebugPage() == 2 && cfg.activeSet == firstId, "切回装载态后 A 能再次套用（%d）", cfg.activeSet);
     }
 
+    TestPalicoControls();
     TestSettingsTransfer();
 
     ImGui_ImplDX11_Shutdown();

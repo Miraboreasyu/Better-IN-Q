@@ -23,6 +23,11 @@ struct LoadoutSet {
     bool linkRadial = false;  // 套道具时联动快捷栏
     int food = -1;            // 猫饭编号，-1 = 跟全局那份走
     int quest = 0;            // 任务 ID，0 = 不改
+    int palicoDeploy = -1;    // -1 unchanged, 0 standby, 1 deployed
+    int palicoLevel = 0;      // 0 unchanged, 1..50
+    int palicoGadget = -1;
+    int palicoLoadout = 0;   // 0 = 不改, 1..24 = 游戏里的随从装备套装（含携带道具）    // -1 unchanged, 0..5
+    int palicoGadgetLevel = 0; // 0 unchanged, 1..15
 };
 
 struct Config {
@@ -31,6 +36,7 @@ struct Config {
     bool reset = false;         // 重置后从据点重接（慢，但完全走正规流程）
     bool acceptOnly = false;    // 只接任务不出发
     bool wyvern = false;        // 普通地图用翼龙起始
+    bool palicoEnabled = false; // Optional per-loadout Palico overrides (off by default).
     bool enabled = true;        // [General] Enabled：1 = 装载态（功能生效）0 = 卸载态（功能全停，只保留面板）
     int activeSet = -1;         // 重开时套用的全套编号（[Set.编号] 的数字），-1 = 不套用
     int food = -1;              // 每次进任务都吃的猫饭，-1 = 不管
@@ -45,6 +51,7 @@ struct Config {
     std::string language = "zh";  // 界面语言 zh / en / ja，auto = 跟系统界面语言
     int debug = 0;
     bool debugForceQuit = true;   // [Debug] ForceQuit：窗口销毁后若进程还不退，主动结束它（默认开）
+    bool debugPalicoProbe = false;  // [Debug] PalicoProbe：只记录随从装备应用函数的调用时机、不改任何东西
     bool debugMealProbe = false;  // [Debug] MealProbe：只记录猫饭那片内存的变化、不写（排查“体力和耐力怎么加”用）
   bool debugNoWndHook = false;  // [Debug] NoWndHook：不去接管游戏窗口过程（排查用；接管后仍然收不到输入才需要它）
     std::string debugDisable;   // [Debug] Disable：排查用，关掉指定的过滤器（pad/cursor/kbd/din/overlay）
@@ -53,6 +60,8 @@ struct Config {
     std::string hkRestart = "LT+RT+L3+R3 | Delete";
     std::string hkPanel = "LB+LT+X | Insert";  // 手柄组合或键盘 Insert 打开/关闭面板
     std::string hkResetOnly = "LB+RB+L3+R3 | Home";  // 只重置任务，不接任务、不出发
+    std::string hkRefill = "F6";                      // 手动把当前道具套装的数量补满（不换套装）
+    bool refillHotkey = false;                        // 手动补全快捷键总开关，默认关闭
 
     std::vector<LoadoutSet> sets;
     std::map<int, FoodPreset> foods;

@@ -20,6 +20,7 @@ enum class ChatNotice {
     CloseWindows,
     NoQuest,
     PanelUnavailable,
+    PalicoBaseOnly,
     Ready,
     Count
 };

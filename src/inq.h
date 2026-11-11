@@ -25,6 +25,7 @@ struct State {
     volatile std::int32_t food = 0;           // INQ+C  进任务时套用的猫饭（编号，0 = 不管）
     volatile std::int32_t equipLoadout = 0;   // INQ+10 待套用的装备套装 1..224
     volatile std::int32_t itemLoadout = 0;    // INQ+14 待套用的道具套装 1..80
+    volatile std::int32_t palicoLoadout = 0;  // 我们的扩展：重开时套用的随从装备套装 1..24
     volatile std::uint32_t message = 0;       // INQ+50 提示位：1 装备套装无效 2 接任务失败
                                               //                4 现在不能用 8 请先关闭窗口
 };
@@ -64,6 +65,10 @@ bool RequestActiveSetEquipApply(const Config& cfg);
 // 不套用全套配置 —— 这一趟只是把任务清掉。
 void RequestResetOnly();
 
+// 手动把当前套装里道具套装的数量补满（不换套装、不改道具种类）。
+// 会核对当前袋里每个格子的 id 已经是该套装的 id，没换好就等 2 秒再放弃。
+bool RequestPouchRefill(const Config& cfg);
+
 // 每 100ms 调一次（CT 里 Lua 定时器做的事）
 void Tick(const Config& cfg);
 
@@ -84,6 +89,7 @@ int ResolveItem(const std::string& s);
 // store ：道具套装的存放格（存档里真正的位置，跟显示编号可能不一样）；装备与 number 相同
 using NamedLoadout = RefName;
 std::vector<NamedLoadout> ListEquipLoadouts();
+std::vector<NamedLoadout> ListPalicoLoadouts();
 std::vector<NamedLoadout> ListItemLoadouts();
 
 // 把配置里「按名字写的」装备/道具换成编号（导入原版 config.txt 之后调一次）。

@@ -11,8 +11,10 @@
 #include "game.h"
 #include "gamedata.h"
 #include "hook.h"
+#include "palico_apply.h"
 #include "i18n.h"
 #include "log.h"
+#include "canteen_rules.h"
 #include "chat_once.h"
 #include "restart_watchdog.h"
 
@@ -33,6 +35,7 @@ using hook::Ctx;
 bool g_ready = false;
 // 运行时总闸：钩子永久驻留，Dormant 时所有游戏侧回调纯旁路。
 std::atomic<bool> g_enabled{false};
+std::atomic<bool> g_palicoEnabled{false};
 std::atomic<unsigned> g_inflight{0};
 // 汇编 call gate 不能直接操作 std::atomic；用 Interlocked 指令维护这两个 32 位闸门。
 alignas(4) volatile std::int32_t g_gateEnabled = 0;
@@ -197,6 +200,18 @@ void OnApplyResetAndEquip(Ctx* c)
     }
     // 在据点 / 调查：只重置没有可重置的任务，直接收工（不然会顺着去接任务）
     if (st == 1 || st == 0xD) {
+        // The original DLL calls the game's apply routine itself. Do not infer
+        // success from this callback's timing, or apply during an expedition.
+        if (g.palicoLoadout > 0) {
+            const int requested = g.palicoLoadout;
+            g.palicoLoadout = 0; // consume once; never carry a failed request into another scene
+            if (st == 1 && g_palicoEnabled.load(std::memory_order_acquire)) {
+                std::string palicoError;
+                if (!palico::ApplyLoadoutOnly(requested, palicoError))
+                    Log("palico: loadout at restart: %s", palicoError.c_str());
+                else Log("palico: game apply returned for loadout %d (equipment outcome not verified)", requested);
+            }
+        }
         if (g.optResetOnly) {
             g.optResetOnly = 0;
             g.restart = 0;
@@ -472,6 +487,8 @@ void ApplyOptions(const Config& cfg, bool resetFood)
 {
     // 禁用先关总闸并排空回调；启用则在所有选项发布完整之后最后开闸。
     if (!cfg.enabled) SetEnabled(false);
+    g_palicoEnabled.store(cfg.palicoEnabled, std::memory_order_release);
+    if (!cfg.palicoEnabled) g.palicoLoadout = 0;
     g.optReset = cfg.reset ? 1 : 0;
     g.optAcceptOnly = cfg.acceptOnly ? 1 : 0;
     g.optWyvern = cfg.wyvern ? 1 : 0;
@@ -530,6 +547,25 @@ int ResolveEquip(const std::string& s)
 //  选「米拉2」（存放 5 / 显示 20）结果套上了显示第 5 号「重弩」）。
 // ---------------------------------------------------------------------------
 std::uintptr_t ItemNameAt(std::uintptr_t slot, int s) { return slot + std::uintptr_t(s) * 0x768 - 0x28; }
+
+// 道具袋与道具套装的条目布局（实机核对）：每格 0x10，前 8 字节是物品数据指针，
+// +8 是物品 id，+0xC 是数量。道具袋在存档槽 +0x38080；套装记录在 slot+n*0x768，
+// 24 格从记录 -0x08 开始，所以第 i 格的 id/count 就是记录 + i*0x10 处的 +0/+4。
+constexpr std::uintptr_t kPouch = 0x38080;
+struct ItemCell { std::uint32_t id; std::uint32_t count; };
+
+bool ReadLoadoutCells(std::uintptr_t slot, int store, ItemCell (&cells)[24])
+{
+    if (store < 1 || store > 80) return false;
+    const std::uintptr_t rec = slot + std::uintptr_t(store) * 0x768;
+    if (!Readable(rec, 24 * 0x10)) return false;
+    for (int i = 0; i < 24; ++i) {
+        cells[i].id = Rd<std::uint32_t>(rec + std::uintptr_t(i) * 0x10);
+        cells[i].count = Rd<std::uint32_t>(rec + std::uintptr_t(i) * 0x10 + 4);
+    }
+    return true;
+}
+
 constexpr std::uintptr_t kItemOrder = 0x37FF8;
 
 // 读顺序表；不是 0..79 的排列就当没排过序（显示编号 = 存放格）
@@ -597,6 +633,49 @@ bool ItemSelectionContext(std::uint32_t& stage)
 }
 bool g_pendingLink = false;
 bool g_hasPendingLink = false;
+// 局内套用道具套装后补回被消耗的数量：套装记录里的数量是「满」的参考值。
+// 只对当前袋里 id 已经变成该套装的格子补，绝不动别的格子。
+struct RefillPlan { std::uintptr_t slot = 0; int store = 0; std::uint64_t deadline = 0; bool fillEmpty = false; };
+RefillPlan g_refillPlan;
+std::atomic<bool> g_refillRequest{false};
+
+void ServiceItemRefill(std::uintptr_t slot, std::uint64_t now)
+{
+    if (!g_refillPlan.store) return;
+    if (slot != g_refillPlan.slot || now > g_refillPlan.deadline) { g_refillPlan = {}; return; }
+    ItemCell cells[24];
+    if (!ReadLoadoutCells(slot, g_refillPlan.store, cells)) return;
+    int changed = 0;
+    if (!g_refillPlan.fillEmpty) {
+        // 套用后的自动补全：先全部核对 id，游戏还没把套装换上就等下一拍，绝不按位置硬写。
+        for (int i = 0; i < 24; ++i) {
+            if (!cells[i].id) continue;
+            if (Rd<std::uint32_t>(slot + kPouch + std::uintptr_t(i) * 0x10 + 8) != cells[i].id)
+                return;
+        }
+    }
+    for (int i = 0; i < 24; ++i) {
+        if (!cells[i].id || !cells[i].count) continue;
+        const std::uintptr_t at = slot + kPouch + std::uintptr_t(i) * 0x10;
+        const std::uint32_t curId = Rd<std::uint32_t>(at + 8);
+        if (curId == 0) {
+            // 手动补全时，玩家丢空的格子按记录补回种类和数量。
+            if (!g_refillPlan.fillEmpty) continue;
+            Wr<std::uint32_t>(at + 8, cells[i].id);
+            Wr<std::uint32_t>(at + 0xC, cells[i].count);
+            ++changed;
+            continue;
+        }
+        if (curId != cells[i].id) continue;   // 袋里是别的道具：绝不覆盖
+        if (cells[i].count && Rd<std::uint32_t>(at + 0xC) < cells[i].count) {
+            Wr<std::uint32_t>(at + 0xC, cells[i].count);
+            ++changed;
+        }
+    }
+    if (changed) Log("item refill: 套装 %d 补回 %d 格数量", g_refillPlan.store, changed);
+    g_refillPlan = {};
+}
+
 int g_savedRadial = -1;                 // CT 的 wassetting：套道具前「联动快捷栏」原来的值
 std::uintptr_t g_savedRadialSlot = 0;    // 必须恢复到当时改过的同一个存档槽
 RestartWatchdog g_restartWatchdog;       // 主循环拥有；新请求/取消/停用都重置
@@ -647,10 +726,13 @@ void ClearPendingAfterDrain()
     ::InterlockedExchange(reinterpret_cast<volatile LONG*>(&g.restart), 0);
     g.optResetOnly = 0;
     g.equipLoadout = 0;
+    g.palicoLoadout = 0;
     g.itemLoadout = 0;
     g_pendingEquipApply.store(0, std::memory_order_release);
     g_pendingSetItem = 0;
     g_immediateSetItem = false;
+    g_refillPlan = {};
+    g_refillRequest.store(false, std::memory_order_release);
     g_deferredUnsafeEquipWarning.store(false, std::memory_order_release);
     g_pendingLink = false;
     g_hasPendingLink = false;
@@ -708,6 +790,8 @@ void QueueSet(const LoadoutSet& s)
     if (e) g.equipLoadout = e;
     if (it) { g_pendingSetItem = it; g_pendingLink = s.linkRadial; g_hasPendingLink = true; }
     if (s.food > 0) g.food = s.food;
+    g.palicoLoadout = g_palicoEnabled.load(std::memory_order_acquire) &&
+        s.palicoLoadout > 0 && s.palicoLoadout <= 24 ? s.palicoLoadout : 0;
     if (gamedata::ValidQuestId(s.quest)) g.questId = (std::uint32_t)s.quest;
 }
 
@@ -793,6 +877,14 @@ void RequestResetOnly()
     g.restart = 1;
 }
 
+bool RequestPouchRefill(const Config& cfg)
+{
+    ActiveCall call;
+    if (!call || !cfg.enabled || !cfg.refillHotkey || !g_ready) return false;
+    g_refillRequest.store(true, std::memory_order_release);
+    return true;
+}
+
 std::vector<NamedLoadout> ListEquipLoadouts()
 {
     std::vector<NamedLoadout> r;
@@ -806,6 +898,24 @@ std::vector<NamedLoadout> ListEquipLoadouts()
         r.push_back({n, name[0] ? std::string(name) : std::string(i18n::Tr("装备套装 ", "Equip loadout ", "装備セット ")) + std::to_string(n), n});
     }
     return r;
+}
+
+std::vector<NamedLoadout> ListPalicoLoadouts()
+{
+    std::vector<NamedLoadout> result;
+    const std::uintptr_t slot = SaveSlot();
+    if (!slot) return result;
+    for (int n = 1; n <= 24; ++n) {
+        const std::uintptr_t record = slot + 0x13B574 + std::uintptr_t(n - 1) * 0x130;
+        // DLL 9e00: +0x100 is the saved weapon, -1 denotes an empty record.
+        // Names occupy the first 64 bytes; omit blank/empty slots entirely.
+        if (!Readable(record, 0x104) || Rd<std::uint32_t>(record + 0x100) == 0xFFFFFFFFu) continue;
+        char name[65] = {};
+        std::memcpy(name, reinterpret_cast<const void*>(record), 64);
+        if (name[0] == 0 || std::string(name).find_first_not_of(" \t\r\n") == std::string::npos) continue;
+        result.push_back({n, name, n});
+    }
+    return result;
 }
 
 std::vector<NamedLoadout> ListItemLoadouts()
@@ -913,6 +1023,18 @@ void Tick(const Config& cfg)
     const std::uintptr_t piui = P(pui + 0x170);
     const std::uintptr_t slot = SaveSlot();
 
+    // 手动补全快捷键：只补当前套装的道具数量，不换套装。
+    if (g_refillRequest.exchange(false)) {
+        const LoadoutSet* active = nullptr;
+        for (const auto& s : cfg.sets) if (s.id == cfg.activeSet) { active = &s; break; }
+        const int display = active ? ResolveItem(active->item) : 0;
+        const int st = (slot && display > 0) ? ItemStoreOfDisplay(slot, display) : 0;
+        if (st) g_refillPlan = {slot, st, ::GetTickCount64() + 2000, true};
+        else Chat(i18n::Tr("Better-IN-Q：当前套装没有道具套装，没法补全",
+                           "Better-IN-Q: this loadout has no item loadout to refill",
+                           "Better-IN-Q：このセットにはアイテムセットがないため補充できません"));
+    }
+
     // 道具套装（通过 UI 命令让游戏自己套用）
     if (g_pendingSetItem > 0 && slot && piui) {
         g_immediateSetItem = false;
@@ -940,6 +1062,8 @@ void Tick(const Config& cfg)
             Wr<std::uint64_t>(uib + 0x4FE0, kItemLoadoutCmd2);
             Wr<std::uint64_t>(uib + 0x5018, uib + 0x4FE0);
             Wr<std::uint64_t>(uib + 0x8F60, 1);
+            // 据点、任务、探索都补：记录里的数量就是这套的满值。
+            g_refillPlan = {slot, st, ::GetTickCount64() + 2000};
             Log("item loadout %d 已提交（联动快捷栏 %d）", n, g_savedRadial == -1 ? -1 : (g_pendingLink ? 1 : 2));
         } else {
             ChatOnce(ChatNotice::EmptyItem, i18n::Fmt(i18n::Tr("Better-IN-Q：道具套装 %d 是空的",
@@ -948,6 +1072,8 @@ void Tick(const Config& cfg)
         }
     }
 
+    ServiceItemRefill(slot, ::GetTickCount64());
+
     // 猫饭：只在明确选中预设时于读盘期间写入（CT：pfood+19A4+i*4，i=1..8）。
     // 未选（0/-1）不覆盖；数值相同不能证明是我们写的，也可能是玩家手动吃的。
     if (pload && Rd<std::uint32_t>(pload + 0x1D04) != 0) {
@@ -955,7 +1081,9 @@ void Tick(const Config& cfg)
         auto it = cfg.foods.find((int)g.food);
         if (pf && g.food > 0 && it != cfg.foods.end()) {
             const FoodPreset& f = it->second;
-            const std::int32_t v[8] = {f.hp, f.stamina, f.attack, f.defense, f.elemRes,
+            // 空预设是「清空猫饭」，耐力照 0 写；正常一顿饭食堂只给 +50。
+            const std::int32_t stamina = canteen::Neutral(f.hp, f.stamina, f.attack, f.defense, f.elemRes, f.skill) ? 0 : 2;
+            const std::int32_t v[8] = {f.hp, stamina, f.attack, f.defense, f.elemRes,
                                        f.skill[0], f.skill[1], f.skill[2]};
             for (int i = 0; i < 8; ++i) Wr<std::int32_t>(pf + 0x19A8 + i * 4, v[i]);
         }

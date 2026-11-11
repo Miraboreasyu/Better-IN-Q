@@ -27,6 +27,7 @@ struct Model {
     std::string version;
     std::string status;                   // 底部提示（最近一条）
     std::vector<LoadoutName> equipNames;  // 游戏里的装备套装名（打开面板时刷新）
+    std::vector<LoadoutName> palicoNames; // Real, named Palico loadouts; number is the stable 1-based ID.
     std::vector<LoadoutName> itemNames;   // 游戏里的道具套装名（按显示编号）
 
     bool reqRestart = false;              // 立刻重开（接任务 → 出发）
@@ -127,6 +128,7 @@ void DebugCloseRename();
 // 预览用：直接进「移动顺序」模式（kind 1 = 套装，2 = 猫饭）/ 直接新建一套并弹起名框
 void DebugMove(int kind, int id);
 float DebugListScroll();
+int DebugListFocusId();   // 上帧列表里真正聚焦的稳定条目 ID（0 = 不在列表）
 bool DebugMoveActive();   // 现在是不是在移动模式
 int DebugMoveId();        // 正在移动的那一项的编号（0 = 没有）
 // 测试用：按起名框的规则截断一段名字（验证是按「字」算而不是按字节）

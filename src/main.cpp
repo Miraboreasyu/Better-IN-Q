@@ -24,6 +24,7 @@
 #include "i18n.h"
 #include "inqimport.h"
 #include "profile.h"
+#include "palico_apply.h"
 #include "settings_transfer.h"
 #include "hook.h"
 #include "inq.h"
@@ -45,7 +46,7 @@ volatile LONG g_teardown = 0;   // 窗口已销毁/进程在退出，这时候�
 // 窗口已经没了、我们正在收尾：异常处理器从此一律不碰（见 OnCrash）。
 std::atomic<bool> g_exiting{false};
 std::atomic<long> g_inCrash{0};
-const char* const kVersion = "0.7.3.1";
+const char* const kVersion = "0.7.4";
 
 // 主循环线程和游戏渲染线程（画面板）共用，都要先拿这把锁
 std::mutex g_mx;
@@ -87,24 +88,28 @@ void OnOverlayDraw(float w, float h)
 }
 
 struct Hotkeys {
-    Hotkey restart, panel, resetOnly;
-    std::string specs[3];
+    Hotkey restart, panel, resetOnly, refill;
+    std::string specs[4];
     bool parsed = false;
     // 存盘时也会调：快捷键没变就不重新解析（按键的按下状态要保留，不然按着时存盘会误触发）
     void Parse(const Config& c)
     {
-        if (parsed && specs[0] == c.hkRestart && specs[1] == c.hkPanel && specs[2] == c.hkResetOnly) return;
+        if (parsed && specs[0] == c.hkRestart && specs[1] == c.hkPanel && specs[2] == c.hkResetOnly &&
+            specs[3] == c.hkRefill) return;
         parsed = true;
         specs[0] = c.hkRestart;
         specs[1] = c.hkPanel;
         specs[2] = c.hkResetOnly;
+        specs[3] = c.hkRefill;
         restart = ParseHotkey(c.hkRestart);
         panel = ParseHotkey(c.hkPanel);
         // 和重开键一样旁路轮询手柄组合；面板关闭时不扣留、延迟或吞掉游戏输入。
         resetOnly = ParseHotkey(c.hkResetOnly);
+        refill = ParseHotkey(c.hkRefill);
         LogHotkey("Restart", c.hkRestart, restart);
         LogHotkey("Panel", c.hkPanel, panel);
         LogHotkey("ResetOnly", c.hkResetOnly, resetOnly);
+        LogHotkey("Refill", c.hkRefill, refill);
     }
 };
 
@@ -301,6 +306,13 @@ DWORD WINAPI Worker(LPVOID)
     }
     if (!report.empty()) Log("install report:\n%s", report.c_str());
 
+    // Resolve before diagnostics: the old probe patched signature byte +7 and
+    // made every later scan fail. Production must not install that probe at all.
+    {
+        std::string palicoError;
+        if (!palico::ResolveLoadoutApply(game::EXE,palicoError)) Log("%s",palicoError.c_str());
+        if (g_cfg.debugPalicoProbe) Log("palico: legacy entry probe disabled; it changes the apply signature");
+    }
     overlay::Callbacks cb;
     cb.init = OnOverlayInit;
     cb.opened = OnOverlayOpened;
@@ -387,6 +399,7 @@ DWORD WINAPI Worker(LPVOID)
         LARGE_INTEGER q0, q1;
         ::QueryPerformanceCounter(&q0);
         in.Poll();
+        // Legacy PalicoProbe is ignored in production; no sampling or entry patch.
         ::QueryPerformanceCounter(&q1);
         {
             const double us = QpcUs((unsigned long long)(q1.QuadPart - q0.QuadPart));
@@ -407,6 +420,10 @@ DWORD WINAPI Worker(LPVOID)
                 tickN = 0;
             }
         }
+        // The restart reloads the save slot, so equipment loadouts cannot be
+        // applied before it. Apply once each time we are back at base and idle;
+        // leaving the base or starting a restart re-arms it. This also covers
+        // the first quest after launch.
         bool capturing;   // 面板正在录快捷键：按的键是要录的，不当快捷键用
         {
             std::lock_guard<std::mutex> lk(g_mx);
@@ -427,6 +444,7 @@ DWORD WINAPI Worker(LPVOID)
                 titleSample ? "title" : "scene fallback");
         // Install once on title readiness, not on each scene/blackout transition.
         // Failed partial installs are never retried; later panel edges report it.
+
         if (startupGate.BeginInstall(off.overlay)) {
             std::string installError;
             panelOk = overlay::Install(cb, installError);
@@ -450,6 +468,7 @@ DWORD WINAPI Worker(LPVOID)
         const bool open = overlay::IsOpen();
         const bool restartKey = in.Fired(hk.restart);       // 面板开着时不响应，免得在面板里误触
         const bool resetKey = in.Fired(hk.resetOnly);
+        const bool refillKey = g_cfg.refillHotkey && in.Fired(hk.refill);
 
         {
             std::lock_guard<std::mutex> lk(g_mx);
@@ -514,7 +533,7 @@ DWORD WINAPI Worker(LPVOID)
             if (wantedMode != runtimeMode) {
                 const runtime::TransitionPlan plan = runtime::PlanTransition(runtimeMode, wantedMode);
                 if (plan.enableInq) inq::ApplyOptions(g_cfg);
-                else inq::SetEnabled(false);
+                else { inq::SetEnabled(false); }
                 if (plan.closePanel) SetPanel(false);   // 同时让四路输入过滤恢复，面板快捷键之后仍可再打开
                 if (plan.unblockInputs && g_blocked) SetPanel(false);
                 m.reqRestart = false;
@@ -528,17 +547,57 @@ DWORD WINAPI Worker(LPVOID)
             const runtime::HotkeyActions actions = runtime::GateHotkeys(runtimeMode, false,
                                                                        sceneActions && restartKey,
                                                                        sceneActions && resetKey);
-            if (!open && actions.restart) { Log("hotkey: restart"); inq::RequestRestart(g_cfg); }
-            if (!open && actions.resetOnly) { Log("hotkey: reset only"); inq::RequestResetOnly(); }
+            auto requestRestart = [&]() {
+                const auto* set = g_cfg.FindSetById(g_cfg.activeSet);
+                // No prompt: the panel already shows these values and the restart
+                // hotkey must stay usable with a gamepad.
+                if (set && g_cfg.palicoEnabled && runtimeMode == runtime::Mode::Active && startupGate.AllowsActions() &&
+                    !m.reqSlot && !m.reqImportInq && inq::g.restart == 0 && inq::Ready() &&
+                    (set->palicoDeploy >= 0 || set->palicoLevel > 0 || set->palicoGadget >= 0 ||
+                     set->palicoGadgetLevel > 0 || set->palicoLoadout > 0)) {
+                    if (!palico::AtBaseIdle()) {
+                        ChatOnce(ChatNotice::PalicoBaseOnly, i18n::Tr("Better-IN-Q：随从修改只在据点生效，这次先直接重开",
+                                                                     "Better-IN-Q: Palico changes apply at base only; restarting without them",
+                                                                     "Better-IN-Q：オトモの変更は拠点のみ。今回はそのまま再開します"));
+                    } else {
+                        std::string captureError;
+                        if (!palico::CaptureOriginal(captureError)) {
+                            Chat(std::string("Better-IN-Q: Palico: ") + captureError); return;
+                        }
+                        const palico::Options options{set->palicoDeploy, set->palicoLevel, set->palicoGadget,
+                                                     set->palicoGadgetLevel, set->palicoLoadout};
+                        const auto result = palico::Apply(options, std::filesystem::path(m.backupsDir) / L"palico");
+                        if (!result.ok) { Chat(std::string("Better-IN-Q: Palico: ") + result.error); return; }
+                    }
+                }
+                inq::RequestRestart(g_cfg);
+            };
+            auto palicoRestore = [&]() {
+                std::string restoreError;
+                if (!palico::RestoreOriginal(std::filesystem::path(m.backupsDir) / L"palico", restoreError))
+                    Chat(std::string("Better-IN-Q: Palico: ") + restoreError);
+            };
+            static bool palicoRestorePending = false;
+            if (!open && actions.restart) { Log("hotkey: restart"); requestRestart(); }
+            if (!open && actions.resetOnly) { Log("hotkey: reset only"); inq::RequestResetOnly(); palicoRestorePending = true; }
+            if (!open && refillKey && runtimeMode == runtime::Mode::Active && sceneActions) {
+                Log("hotkey: refill");
+                inq::RequestPouchRefill(g_cfg);
+            }
 
             if (m.reqClose) { m.reqClose = false; SetPanel(false); }
             if (m.reqRestart) {
                 m.reqRestart = false;
-                if (runtimeMode == runtime::Mode::Active && startupGate.AllowsActions()) { Log("panel: restart"); inq::RequestRestart(g_cfg); }
+                if (runtimeMode == runtime::Mode::Active && startupGate.AllowsActions()) { Log("panel: restart"); requestRestart(); }
             }
             if (m.reqResetOnly) {
                 m.reqResetOnly = false;
-                if (runtimeMode == runtime::Mode::Active && startupGate.AllowsActions()) { Log("panel: reset only"); inq::RequestResetOnly(); }
+                if (runtimeMode == runtime::Mode::Active && startupGate.AllowsActions()) { Log("panel: reset only"); inq::RequestResetOnly(); palicoRestorePending = true; }
+            }
+            if (palicoRestorePending && g_cfg.palicoEnabled && runtimeMode == runtime::Mode::Active &&
+                startupGate.AllowsActions() && palico::AtBaseIdle() && inq::g.restart == 0) {
+                palicoRestorePending = false;
+                palicoRestore();
             }
             if (m.reqApplyEquip) {
                 m.reqApplyEquip = false;
@@ -632,6 +691,10 @@ DWORD WINAPI Worker(LPVOID)
                 lastNamesRefresh = now;
                 m.equipNames.clear();
                 m.itemNames.clear();
+                m.palicoNames.clear();
+                if (g_cfg.palicoEnabled) {
+                    for (const auto& p : inq::ListPalicoLoadouts()) m.palicoNames.push_back({p.number, p.name, p.store});
+                }
                 for (const auto& e : inq::ListEquipLoadouts()) m.equipNames.push_back({e.number, e.name, e.store});
                 for (const auto& it : inq::ListItemLoadouts()) m.itemNames.push_back({it.number, it.name, it.store});
             }

@@ -337,6 +337,35 @@ int main()
     Tick(cfg);
     CHECK(chats.size() == noticeStart + 5 && g.message == 0,
           "deferred failure categories stay consumed across language change and Dormant");
+    Config gateCfg;
+    gateCfg.enabled = true;
+    gateCfg.palicoEnabled = false;
+    LoadoutSet palicoSet;
+    palicoSet.id = 41;
+    palicoSet.palicoLoadout = 7;
+    ApplyOptions(gateCfg);
+    QueueSet(palicoSet);
+    CHECK(g.palicoLoadout == 0, "Palico loadout queue is inert while the feature is disabled");
+    gateCfg.palicoEnabled = true;
+    ApplyOptions(gateCfg);
+    QueueSet(palicoSet);
+    CHECK(g.palicoLoadout == 7, "Palico loadout queue resumes after explicit enable");
+    gateCfg.palicoEnabled = false;
+    ApplyOptions(gateCfg);
+    CHECK(g.palicoLoadout == 0, "disabling clears a pending Palico application");
+    const auto record = [&](int n) { return At(slot) + 0x13B574 + std::uintptr_t(n - 1) * 0x130; };
+    Put<std::uint32_t>(record(1) + 0x100, 1);
+    std::memcpy(reinterpret_cast<void*>(record(1)), "   ", 4);
+    Put<std::uint32_t>(record(2) + 0x100, 1);
+    std::memcpy(reinterpret_cast<void*>(record(2)), "Alpha", 6);
+    Put<std::uint32_t>(record(4) + 0x100, 0xFFFFFFFFu);
+    std::memcpy(reinterpret_cast<void*>(record(4)), "Empty", 6);
+    Put<std::uint32_t>(record(7) + 0x100, 1);
+    std::memcpy(reinterpret_cast<void*>(record(7)), "Bravo", 6);
+    const auto palicoNames = ListPalicoLoadouts();
+    CHECK(palicoNames.size() == 2 && palicoNames[0].number == 2 && palicoNames[0].name == "Alpha" &&
+          palicoNames[1].number == 7 && palicoNames[1].name == "Bravo",
+          "Palico names use real sparse IDs and omit empty or blank records");
     SetEnabled(false);
     std::printf("%d failure(s)\n", failures);
     return failures ? 1 : 0;

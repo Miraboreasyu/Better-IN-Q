@@ -135,6 +135,17 @@ volatile std::int32_t g_gateInflight = 0;
 
 int main()
 {
+    // Regression for the production probe conflict: its +7 patch destroys the
+    // original signature even when the function entry itself is untouched.
+    unsigned char palicoCode[] = {0x48,0x8B,0xC4,0x48,0x89,0x48,0x08,0x53,0x48,0x83,0xEC,0x60,0x90};
+    const char* palicoPattern="48 8B C4 48 89 48 08 53 48 83 EC 60";
+    auto palicoHits=hook::FindAll(reinterpret_cast<std::uintptr_t>(palicoCode),sizeof palicoCode,palicoPattern);
+    CHECK(palicoHits.size()==1,"palico original signature resolves before probe");
+    const auto resolved=palicoHits.empty()?0:palicoHits[0];
+    const unsigned char probePatch[]={0xE9,0,0,0,0,0x90};
+    std::memcpy(palicoCode+7,probePatch,sizeof probePatch);
+    CHECK(hook::FindAll(reinterpret_cast<std::uintptr_t>(palicoCode),sizeof palicoCode,palicoPattern).empty(),"legacy +7 probe makes late original-pattern lookup fail");
+    CHECK(resolved==reinterpret_cast<std::uintptr_t>(palicoCode),"early resolved address is independent of later signature lookup");
     const std::uintptr_t mod = reinterpret_cast<std::uintptr_t>(::GetModuleHandleW(nullptr));
     std::uintptr_t tb = 0; std::size_t tl = 0;
     CHECK(hook::TextRange(mod, tb, tl), "TextRange .text=%p+%zx", (void*)tb, tl);
