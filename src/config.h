@@ -62,6 +62,7 @@ struct Config {
     std::string hkResetOnly = "LB+RB+L3+R3 | Home";  // 只重置任务，不接任务、不出发
     std::string hkRefill = "F6";                      // 手动把当前道具套装的数量补满（不换套装）
     bool refillHotkey = false;                        // 手动补全快捷键总开关，默认关闭
+    bool itemAutoApply = true;                        // 进任务自动套用道具套装 + 跳过确认框（读屏障）
 
     std::vector<LoadoutSet> sets;
     std::map<int, FoodPreset> foods;

@@ -46,7 +46,7 @@ volatile LONG g_teardown = 0;   // 窗口已销毁/进程在退出，这时候�
 // 窗口已经没了、我们正在收尾：异常处理器从此一律不碰（见 OnCrash）。
 std::atomic<bool> g_exiting{false};
 std::atomic<long> g_inCrash{0};
-const char* const kVersion = "0.7.4";
+const char* const kVersion = "0.7.4.1";
 
 // 主循环线程和游戏渲染线程（画面板）共用，都要先拿这把锁
 std::mutex g_mx;
@@ -541,6 +541,14 @@ DWORD WINAPI Worker(LPVOID)
                 m.reqApplyEquip = false;
                 runtimeMode = wantedMode;
                 Log("runtime: %s", runtimeMode == runtime::Mode::Active ? "装载态" : "卸载态（业务旁路，钩子常驻）");
+            }
+            // 读屏障随开关即时装卸；核心还没就绪时等下一次循环再装。
+            static bool barrierApplied = false, barrierKnown = false;
+            const bool wantBarrier = runtimeMode == runtime::Mode::Active && g_cfg.itemAutoApply;
+            if (inq::Ready() && (!barrierKnown || wantBarrier != barrierApplied)) {
+                inq::SetItemBarrier(wantBarrier);
+                barrierApplied = wantBarrier;
+                barrierKnown = true;
             }
 
             const bool sceneActions = startupGate.AllowsActions() && !capturing;

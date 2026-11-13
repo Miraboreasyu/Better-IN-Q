@@ -2666,6 +2666,12 @@ void PageSettings(Model& m)
     HotkeyRow("##hk1", i18n::Tr("重开", "Restart", "再開"), c.hkRestart, m);
     HotkeyRow("##hk3", i18n::Tr("打开面板", "Open panel", "パネルを開く"), c.hkPanel, m, true, true);
     HotkeyRow("##hk4", i18n::Tr("只重置任务", "Reset only", "リセットのみ"), c.hkResetOnly, m);
+    if (ToggleRow("##itemauto", i18n::Tr("进任务自动套用道具", "Auto-apply items on quest entry", "クエスト開始時にアイテムを自動適用"),
+                  i18n::Tr("同时跳过“是否切换快捷栏”的确认；开关立即生效，从下一次套用开始",
+                           "Also skips the shortcut-bar prompt; takes effect immediately for the next apply",
+                           "ショートカットバーの確認も省略。次回の適用からすぐ反映"),
+                  &c.itemAutoApply))
+        m.reqSave = true;
     if (ToggleRow("##refillon", i18n::Tr("允许补满道具快捷键", "Allow the refill hotkey", "補充ホットキーを有効化"),
                   i18n::Tr("默认关闭，防止救援时误触；关闭后手动补全不会执行",
                            "Off by default; manual refill does nothing while off",

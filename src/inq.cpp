@@ -471,6 +471,9 @@ bool Install(const Config& cfg, std::string& report)
 
     // 缩短转场黑屏 / 快速重置
     if (core) PatchValue<std::uint32_t>(kQuickReset, 4, 5, "快速重置", report);
+    // 道具套装：读屏障可随开关立即装卸（不重启游戏）。初始状态跟随配置，
+    // 运行中由 main 在设置变化时调用 SetItemBarrier。
+    if (core) SetItemBarrier(cfg.itemAutoApply);
     if (cfg.quickBlackout) {
         PatchValue<float>(kBlackOut1, 1.4f, 0.1f, "转场黑屏1", report);
         PatchValue<float>(kBlackOut2, 0.5f, 0.1f, "转场黑屏2", report);
@@ -635,7 +638,7 @@ bool g_pendingLink = false;
 bool g_hasPendingLink = false;
 // 局内套用道具套装后补回被消耗的数量：套装记录里的数量是「满」的参考值。
 // 只对当前袋里 id 已经变成该套装的格子补，绝不动别的格子。
-struct RefillPlan { std::uintptr_t slot = 0; int store = 0; std::uint64_t deadline = 0; bool fillEmpty = false; };
+struct RefillPlan { std::uintptr_t slot = 0; int store = 0; std::uint64_t deadline = 0; bool fillEmpty = false; bool requireAll = false; };
 RefillPlan g_refillPlan;
 std::atomic<bool> g_refillRequest{false};
 
@@ -645,30 +648,46 @@ void ServiceItemRefill(std::uintptr_t slot, std::uint64_t now)
     if (slot != g_refillPlan.slot || now > g_refillPlan.deadline) { g_refillPlan = {}; return; }
     ItemCell cells[24];
     if (!ReadLoadoutCells(slot, g_refillPlan.store, cells)) return;
-    int changed = 0;
-    if (!g_refillPlan.fillEmpty) {
-        // 套用后的自动补全：先全部核对 id，游戏还没把套装换上就等下一拍，绝不按位置硬写。
+    if (g_refillPlan.fillEmpty) {
+        // 手动补全 / 自己接任务、救援：既然选中了这套道具套装，就直接把整袋
+        // 设成这套的配置（包括清掉这套没带的格子），不跟当前袋里有什么较劲。
+        int changed = 0;
         for (int i = 0; i < 24; ++i) {
-            if (!cells[i].id) continue;
-            if (Rd<std::uint32_t>(slot + kPouch + std::uintptr_t(i) * 0x10 + 8) != cells[i].id)
-                return;
-        }
-    }
-    for (int i = 0; i < 24; ++i) {
-        if (!cells[i].id || !cells[i].count) continue;
-        const std::uintptr_t at = slot + kPouch + std::uintptr_t(i) * 0x10;
-        const std::uint32_t curId = Rd<std::uint32_t>(at + 8);
-        if (curId == 0) {
-            // 手动补全时，玩家丢空的格子按记录补回种类和数量。
-            if (!g_refillPlan.fillEmpty) continue;
+            const std::uintptr_t at = slot + kPouch + std::uintptr_t(i) * 0x10;
+            if (Rd<std::uint32_t>(at + 8) == cells[i].id && Rd<std::uint32_t>(at + 0xC) == cells[i].count)
+                continue;
             Wr<std::uint32_t>(at + 8, cells[i].id);
             Wr<std::uint32_t>(at + 0xC, cells[i].count);
             ++changed;
-            continue;
         }
-        if (curId != cells[i].id) continue;   // 袋里是别的道具：绝不覆盖
-        if (cells[i].count && Rd<std::uint32_t>(at + 0xC) < cells[i].count) {
-            Wr<std::uint32_t>(at + 0xC, cells[i].count);
+        if (changed) Log("item refill: 套装 %d 覆盖 %d 格", g_refillPlan.store, changed);
+        g_refillPlan = {};
+        return;
+    }
+    // 套用后的自动补全：等游戏把这套的每件道具都装进袋里（位置不论），再补数量。
+    std::uint32_t bagId[24] = {}, bagCount[24] = {};
+    for (int i = 0; i < 24; ++i) {
+        bagId[i] = Rd<std::uint32_t>(slot + kPouch + std::uintptr_t(i) * 0x10 + 8);
+        bagCount[i] = Rd<std::uint32_t>(slot + kPouch + std::uintptr_t(i) * 0x10 + 0xC);
+    }
+    auto findBag = [&](std::uint32_t id) {
+        for (int i = 0; i < 24; ++i) if (bagId[i] == id) return i;
+        return -1;
+    };
+    if (g_refillPlan.requireAll) {
+        for (int i = 0; i < 24; ++i) {
+            if (!cells[i].id) continue;
+            if (findBag(cells[i].id) < 0) return;
+        }
+    }
+    int changed = 0;
+    for (int i = 0; i < 24; ++i) {
+        if (!cells[i].id || !cells[i].count) continue;
+        const int at = findBag(cells[i].id);
+        if (at < 0) continue;   // 自动补全不凭空塞新的道具种类
+        if (bagCount[at] < cells[i].count) {
+            Wr<std::uint32_t>(slot + kPouch + std::uintptr_t(at) * 0x10 + 0xC, cells[i].count);
+            bagCount[at] = cells[i].count;
             ++changed;
         }
     }
@@ -885,6 +904,31 @@ bool RequestPouchRefill(const Config& cfg)
     return true;
 }
 
+void SetItemBarrier(bool on)
+{
+    if (!g_ready) return;
+    struct Site { std::uintptr_t addr; std::uint64_t orig; std::uint64_t barrier; };
+    static const Site kSites[] = {
+        {kItemSetRead1, 0x840014041588B60FULL, 0x84909000000001B9ULL},
+        {kItemSetRead2, 0x00140415B8B60F44ULL, 0x909000000001BF41ULL},
+        {kItemSetRead3, 0x480014041588B60FULL, 0x48909000000001B9ULL},
+    };
+    for (const Site& s : kSites) {
+        std::uint64_t cur = 0;
+        std::memcpy(&cur, reinterpret_cast<const void*>(s.addr), sizeof(cur));
+        const std::uint64_t to = on ? s.barrier : s.orig;
+        const std::uint64_t other = on ? s.orig : s.barrier;
+        if (cur == to) continue;
+        if (cur != other) {
+            Log("item barrier: %p 字节不是已知状态（%016llX），跳过", (void*)s.addr,
+                static_cast<unsigned long long>(cur));
+            continue;
+        }
+        if (!hook::WriteMem(s.addr, &to, sizeof(to))) Log("item barrier: %p 写入失败", (void*)s.addr);
+    }
+    Log("item barrier: %s", on ? "开" : "关");
+}
+
 std::vector<NamedLoadout> ListEquipLoadouts()
 {
     std::vector<NamedLoadout> r;
@@ -1023,13 +1067,34 @@ void Tick(const Config& cfg)
     const std::uintptr_t piui = P(pui + 0x170);
     const std::uintptr_t slot = SaveSlot();
 
+    // 玩家自己接任务 / 加入救援时也套一次道具套装：袋子和快捷栏登录一起切。
+    static bool wasInQuest = false;
+    std::uint32_t questStage = 0;
+    const bool inQuest = ItemSelectionContext(questStage);
+    if (inQuest && !wasInQuest && cfg.itemAutoApply) {
+        const LoadoutSet* active = nullptr;
+        for (const auto& s : cfg.sets) if (s.id == cfg.activeSet) { active = &s; break; }
+        const int display = active ? ResolveItem(active->item) : 0;
+        const int st = (slot && display > 0) ? ItemStoreOfDisplay(slot, display) : 0;
+        if (st) {
+            g_pendingSetItem = display;
+            g_immediateSetItem = false;
+        }
+    }
+    wasInQuest = inQuest;
+
     // 手动补全快捷键：只补当前套装的道具数量，不换套装。
     if (g_refillRequest.exchange(false)) {
         const LoadoutSet* active = nullptr;
         for (const auto& s : cfg.sets) if (s.id == cfg.activeSet) { active = &s; break; }
         const int display = active ? ResolveItem(active->item) : 0;
         const int st = (slot && display > 0) ? ItemStoreOfDisplay(slot, display) : 0;
-        if (st) g_refillPlan = {slot, st, ::GetTickCount64() + 2000, true};
+        if (st) {
+            // 走游戏自己的“套用道具套装”命令：道具袋、快捷栏登录和排列一起换，
+            // 不会只改袋子内容而把快捷栏留在上一套。
+            g_pendingSetItem = display;
+            g_immediateSetItem = false;
+        }
         else Chat(i18n::Tr("Better-IN-Q：当前套装没有道具套装，没法补全",
                            "Better-IN-Q: this loadout has no item loadout to refill",
                            "Better-IN-Q：このセットにはアイテムセットがないため補充できません"));
@@ -1063,7 +1128,7 @@ void Tick(const Config& cfg)
             Wr<std::uint64_t>(uib + 0x5018, uib + 0x4FE0);
             Wr<std::uint64_t>(uib + 0x8F60, 1);
             // 据点、任务、探索都补：记录里的数量就是这套的满值。
-            g_refillPlan = {slot, st, ::GetTickCount64() + 2000};
+            g_refillPlan = {slot, st, ::GetTickCount64() + 2000, false, true};
             Log("item loadout %d 已提交（联动快捷栏 %d）", n, g_savedRadial == -1 ? -1 : (g_pendingLink ? 1 : 2));
         } else {
             ChatOnce(ChatNotice::EmptyItem, i18n::Fmt(i18n::Tr("Better-IN-Q：道具套装 %d 是空的",

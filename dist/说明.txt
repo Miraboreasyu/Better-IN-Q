@@ -1,4 +1,4 @@
-Better-IN-Q v0.7.4
+Better-IN-Q v0.7.4.1
 面板操作说明 / Panel Guide
 =========================
 
@@ -66,8 +66,11 @@ L3 / R3 表示按下左 / 右摇杆。手柄按键名称采用 Xbox 标识。
 游戏内修改装备或道具套装名称后，面板列表会自动更新。
 
 据点中套用后可更换装备；任务或探索中切换仅更换道具，不动装备和猫饭。局内如需换装备，请自行前往帐篷。
-据点、任务或探索中切换道具套装后，会把这套里已被消耗的道具数量补回套装记录的数量；只补这套自身列出的格子，不动其它道具，也不改写道具种类。
-打开开关后，随时按补满道具快捷键（默认 F6）也会对当前道具套装做同样的补全；丢空的格子会按套装补回道具和数量，袋里放着别的道具的格子不会被覆盖。
+据点、任务或探索中切换道具套装后，会把这套里已被消耗的道具数量补回套装记录的数量。
+套用道具套装时不再弹出“是否同时套用快捷栏”的确认，固定按“是”处理，快捷栏与道具一起切换。
+设置页的「进任务自动套用道具」默认开启：进任务、加入救援时自动套用当前套装并跳过上面的确认；关闭后不再自动套用，也就不会有这个确认框。开关立即生效，从下一次套用开始。
+自己接任务、加入别人的任务或救援时，会按当前套装重新套用一次道具套装，所以道具袋、快捷栏登录和排列都会一起切过去；用光还没合成的道具也会补回来。
+打开开关后，随时按补满道具快捷键（默认 F6）也做同样的事。
 读盘或状态未就绪时不提交这次切换，请等画面稳定后重选。
 道具、猫饭和任务在之后重开或进入任务时按选择生效。
 编辑已套用套装的装备选项，也会请求更换装备。
@@ -227,8 +230,11 @@ Equipment and item loadout names update automatically after you rename them in t
 Equipment can be changed at base. During quests or expeditions, selecting a loadout changes only its items, not equipment or meals. Use the tent to change equipment.
 During loading or an unknown game state, this change is not submitted. Select again once the game is ready.
 Items, meals and quests take effect on a subsequent restart or quest entry, as appropriate.
-Switching an item loadout (at base, in a quest or on an expedition) refills the counts of that loadout's own items back to the amounts stored in it; other slots and item kinds are untouched.
-With that switch on, the refill hotkey (F6 by default) does the same for the active item loadout at any time; slots you emptied are refilled with that loadout's item and count, while slots holding a different item are never overwritten.
+Switching an item loadout (at base, in a quest or on an expedition) refills the counts of that loadout's own items back to the amounts stored in it.
+Joining a quest, another player's quest or an SOS re-applies the active item loadout, so the pouch, item-bar registrations and their order all switch together; items that were used up and not re-crafted come back too.
+Applying an item loadout no longer asks whether to switch the shortcut bar; it always answers “yes” and switches both together.
+“Auto-apply items on quest entry” is on by default: entering a quest or joining an SOS applies the active loadout and skips that prompt. Turning it off stops the auto-apply, so no prompt appears either. The switch takes effect immediately, from the next apply.
+With that switch on, the refill hotkey (F6 by default) does the same at any time.
 Changing the equipment option of the active loadout also requests an equipment change.
 The editor's OK / apply button applies that loadout and returns to the list.
 To edit without applying, make your changes and go back instead.

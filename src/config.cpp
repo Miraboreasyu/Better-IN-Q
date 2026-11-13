@@ -104,6 +104,9 @@ std::string Render(const Config& c)
     o += kv("RefillHotkey", num(c.refillHotkey), i18n::Tr("1 = 允许手动补满道具快捷键（默认 0，防误触）",
                                                          "1 = allow the manual item-refill hotkey (default 0)",
                                                          "1 = アイテム補充ホットキーを有効化（既定 0）"));
+    o += kv("ItemAutoApply", num(c.itemAutoApply), i18n::Tr("1 = 进任务自动套用道具套装并跳过快捷栏确认（默认 1）",
+                                                           "1 = auto-apply the item loadout on quest entry and skip the bar prompt (default 1)",
+                                                           "1 = クエスト開始時にアイテムセットを自動適用し確認を省略（既定 1）"));
     o += kv("WyvernStart", num(c.wyvern), i18n::Tr("1 = 普通地图用翼龙起始",
                                                    "1 = start normal maps with the wingdrake",
                                                    "1 = 通常マップは翼竜で開始"));
@@ -643,6 +646,7 @@ bool ParseConfigText(const std::string& text, Config& cfg, std::string& err)
             else if (k == "WyvernStart") cfg.wyvern = Bool(v);
             else if (k == "PalicoEnabled") cfg.palicoEnabled = Bool(v);
             else if (k == "RefillHotkey") cfg.refillHotkey = Bool(v);
+            else if (k == "ItemAutoApply") cfg.itemAutoApply = Bool(v);
             else if (k == "ActiveSet") cfg.activeSet = n > 0 ? n : -1;
             else if (k == "Food") cfg.food = n > 0 ? n : -1;
             else if (k == "NextSetId") cfg.nextSetId = n;

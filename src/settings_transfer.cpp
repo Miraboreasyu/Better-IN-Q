@@ -90,7 +90,7 @@ bool Validate(const std::string& text, int mode, bool complete, Config& output, 
         if (section == "General") {
             const bool slot = In(k,"ActiveSet|Food|FoodOrder|NextSetId|NextFoodId");
             if ((mode == 0 && slot) || (mode == 1 && !slot)) return Fail(err,"INI key in wrong backup segment");
-            if (In(k,"Enabled|Reset|AcceptOnly|WyvernStart|QuickBlackout|PalicoEnabled|RefillHotkey")) ok = In(v,"0|1|true|false|on|off|yes|no");
+            if (In(k,"Enabled|Reset|AcceptOnly|WyvernStart|QuickBlackout|PalicoEnabled|RefillHotkey|ItemAutoApply")) ok = In(v,"0|1|true|false|on|off|yes|no");
             else if (In(k,"ActiveSet|Food")) ok = Number(v,-1,1000000) && (mode == 2 || v != "0");
             else if (In(k,"NextSetId|NextFoodId")) ok = Number(v,1,1000001);
             else if (k == "FoodOrder") ok = List(v,1,1000000);

@@ -69,6 +69,10 @@ void RequestResetOnly();
 // 会核对当前袋里每个格子的 id 已经是该套装的 id，没换好就等 2 秒再放弃。
 bool RequestPouchRefill(const Config& cfg);
 
+// 道具套装的“读屏障”可运行时开关：打开时把三处 save+0x140415 的读取固定为 1，
+// 关闭时恢复原始字节；不需要重启游戏。
+void SetItemBarrier(bool on);
+
 // 每 100ms 调一次（CT 里 Lua 定时器做的事）
 void Tick(const Config& cfg);
 

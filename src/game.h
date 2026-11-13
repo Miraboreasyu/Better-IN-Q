@@ -22,6 +22,12 @@ constexpr const char* kAobQuestLoad = "F7 81 98 22 00 00 11 00 00 80 48 8B D9 0F
 
 // ---- 常量补丁 ----
 constexpr std::uintptr_t kQuickReset  = EXE + 0x1B71596;  // dd 4 → 5（代码段里的立即数）
+// 道具套装的“自动套用快捷栏”设置：整个 exe 只有这三处读 save+0x140415。
+// 读屏障把读取结果固定为 1（联动快捷栏；2 = 不联动，0 = 每次询问），
+// 游戏就不会再问“是否同时切换快捷栏”，也不写存档，玩家在选项里选什么都不影响这三处判断。
+constexpr std::uintptr_t kItemSetRead1 = EXE + 0x1D3A2F8;  // movzx ecx,[rax+0x140415]
+constexpr std::uintptr_t kItemSetRead2 = EXE + 0x1D3A6B0;  // movzx r15d,[rax+0x140415]
+constexpr std::uintptr_t kItemSetRead3 = EXE + 0x1D3AA5D;  // movzx ecx,[rax+0x140415]
 constexpr std::uintptr_t kBlackOut1   = EXE + 0x2FC6A1C;  // float 1.4 → 0.1
 constexpr std::uintptr_t kBlackOut2   = EXE + 0x33F4F58;  // float 0.5 → 0.1
 
