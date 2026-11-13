@@ -1276,7 +1276,7 @@ static void TestPalicoControls()
     cfg.sets.push_back(set);
     cfg.activeSet = -1;
     m.cfg = &cfg;
-    m.palicoNames = {{2, "Alpha", 2}, {7, "Bravo", 7}};
+    m.palicoNames = {{2, "t", 2}, {7, "Bravo", 7}}; // A real name must not be mistaken for escaped whitespace.
     auto openEdit = [&] {
         ui::OnOpen(m);
         ui::DebugGo(2, 0);

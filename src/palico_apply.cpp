@@ -142,6 +142,7 @@ bool CaptureSaveFields(const ApplyBackend& b, const ApplyContext& c, SaveOrigina
                                 kGadgetXp+12, kGadgetXp+16, kGadgetXp+20};
     std::uint32_t v[8]{};
     for (int i=0;i<8;++i) if (!b.reader.Get(c.slot+off[i], v[i])) return false;
+    out.slot=c.slot; out.slotIndex=c.slotIndex;
     out.deploy=v[0]; out.xp=v[1];
     for (int i=0;i<6;++i) out.gadgetXp[i]=v[2+i];
     out.valid=true; return true;
@@ -155,6 +156,8 @@ Result RestoreWithBackend(const SaveOriginal& o, const std::filesystem::path& di
     ApplyContext c,after;
     if (!b.context(b.user,c) || c.slot < 0x10000 || c.slotIndex<0 || c.slotIndex>2)
         return fail("Palico restore requires base Idle and a valid save slot");
+    if (o.slot != c.slot || o.slotIndex != c.slotIndex)
+        return fail("Palico restore belongs to another save slot; nothing written");
     std::vector<unsigned char> snapshot;
     try { snapshot.resize(kPalicoSlotSize); }
     catch (...) { return fail("Unable to allocate full-slot backup snapshot"); }
@@ -165,7 +168,7 @@ Result RestoreWithBackend(const SaveOriginal& o, const std::filesystem::path& di
         auto before=Word(snapshot,offset);
         if (before!=value) patches[count++]={offset,before,value};
     };
-    add(kDeploy,o.deploy); add(kXp,o.xp);
+    add(kDeploy,(Word(snapshot,kDeploy) & ~0x10u) | (o.deploy & 0x10u)); add(kXp,o.xp);
     for (int i=0;i<6;++i) add(kGadgetXp+std::size_t(i)*4, o.gadgetXp[i]);
     if (!count) { result.ok=true; return result; }
     if (!b.backup(b.user,c,snapshot.data(),snapshot.size(),directory,result.backupPath))
@@ -330,6 +333,11 @@ Result Apply(const Options& o,const std::filesystem::path& directory) {
     Result r; r.error="Palico apply is supported only on Win64"; return r;
 #endif
 }
+bool EndCharacterSession() {
+    const bool pending = g_saveOriginal.valid;
+    g_saveOriginal = {};
+    return pending;
+}
 bool AtBaseIdle() {
 #ifdef _WIN32
     ApplyContext c;
@@ -340,7 +348,15 @@ bool AtBaseIdle() {
 }
 bool CaptureOriginal(std::string& error) {
 #ifdef _WIN32
-    if (g_saveOriginal.valid) { error.clear(); return true; }
+    if (g_saveOriginal.valid) {
+        ApplyContext current;
+        if (!NativeContext(nullptr,current) || current.slot!=g_saveOriginal.slot ||
+            current.slotIndex!=g_saveOriginal.slotIndex) {
+            error="Palico snapshot belongs to another save slot; restore it on its original character first";
+            return false;
+        }
+        error.clear(); return true;
+    }
     ApplyBackend b; b.reader={NativeRead,nullptr}; b.exe=kExe;
     b.context=NativeContext; b.write=NativeWrite; b.tryLock=NativeLock;
     b.unlock=NativeUnlock; b.backup=NativeBackup;

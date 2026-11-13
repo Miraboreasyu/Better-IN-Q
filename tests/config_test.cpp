@@ -369,7 +369,14 @@ int main()
         CHECK(b.activeSet == 7, "读回：ActiveSet=%d（期望 7）", b.activeSet);
         CHECK(b.food == 3, "读回：Food=%d（期望 3）", b.food);
         CHECK(b.foods.count(3) == 1, "读回：猫饭 3 存在，数量 %zu", b.foods.size());
-
+        HANDLE profileLock = ::CreateFileW(profP.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
+                                            FILE_ATTRIBUTE_NORMAL, nullptr);
+        CHECK(profileLock != INVALID_HANDLE_VALUE, "lock profile fixture for failed read");
+        if (profileLock != INVALID_HANDLE_VALUE) {
+            Config failed;
+            CHECK(!LoadSplit(baseP, profP, failed, err3), "unreadable profile reports failure instead of publishing base as that character");
+            ::CloseHandle(profileLock);
+        }
         ::DeleteFileW(baseP.c_str());
         ::DeleteFileW(profP.c_str());
     }

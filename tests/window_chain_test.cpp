@@ -20,8 +20,13 @@ static HWND nestOther=nullptr;
 static int nestWrapperCalls=0, nestClassCalls=0, ncBounceCalls=0;
 static bool nestDifferent=false, ncBounce=false;
 static LRESULT CALLBACK NestPrevious(HWND h,UINT m,WPARAM w,LPARAM l) {
+    if(m==WM_IME_SETCONTEXT) {
+        ++nestWrapperCalls;
+        return w==0 ? SendMessageW(h,m,1,l) : 456;
+    }
     if(m>=kNestBase && m<kNestBase+64) {
         ++nestWrapperCalls;
+        if(m==kNestBase+34 && w==0) return SendMessageW(h,m,1,2);
         if(m==kNestBase+32) {
             if(nestDifferent) return SendMessageW(h,kNestBase+33,0,0);
             if(nestOther && h!=nestOther) return SendMessageW(nestOther,m,0,0);
@@ -363,6 +368,14 @@ int main() {
         CHECK(nestWrapperCalls==28 && nestClassCalls==0);
         nestOther=nullptr;
         CHECK(overlay::g_msgNest==nullptr);
+        nestWrapperCalls=nestClassCalls=0;
+        CHECK(SendMessageW(f.h,kNestBase+34,0,0)==456);
+        CHECK(nestWrapperCalls==2 && nestClassCalls==0);
+        CHECK(overlay::g_msgNest==nullptr && overlay::g_wndDepth==0);
+        nestWrapperCalls=nestClassCalls=0;
+        CHECK(SendMessageW(f.h,WM_IME_SETCONTEXT,0,0)==456);
+        CHECK(nestWrapperCalls==2 && nestClassCalls==0);
+        CHECK(overlay::g_msgNest==nullptr && overlay::g_wndDepth==0);
 
         // Even NCDESTROY must hit the same-message recursion gate. Here the
         // class procedure itself bounces, so class fallback alone cannot end it.

@@ -79,16 +79,19 @@ thread_local MsgNest* g_msgNest = nullptr;
 struct MsgNest {
     HWND hwnd;
     UINT msg;
+    WPARAM w;
+    LPARAM l;
     MsgNest* previous;
-    MsgNest(HWND h, UINT m) : hwnd(h), msg(m), previous(g_msgNest) { g_msgNest = this; }
+    MsgNest(HWND h, UINT m, WPARAM wp, LPARAM lp)
+        : hwnd(h), msg(m), w(wp), l(lp), previous(g_msgNest) { g_msgNest = this; }
     ~MsgNest() { g_msgNest = previous; }
 };
 
-int NestOf(HWND hwnd, UINT msg)
+int NestOf(HWND hwnd, UINT msg, WPARAM w, LPARAM l)
 {
     int count = 0;
     for (const MsgNest* entry = g_msgNest; entry; entry = entry->previous)
-        if (entry->hwnd == hwnd && entry->msg == msg) ++count;
+        if (entry->hwnd == hwnd && entry->msg == msg && entry->w == w && entry->l == l) ++count;
     return count;
 }
 
@@ -107,9 +110,8 @@ WNDPROC ResolvePrevious(HWND h, WNDPROC previous)
     return nullptr;
 }
 
-// 窗口类过程：游戏真正注册的那个窗口过程。实测游戏切场景时会把窗口过程临时换成
-// WINMM 里的函数（21:18 那段日志里前驱是 WINMM+0x4A5F0），转发给它等于把消息塞回
-// 我们自己，所以一旦发现同一条消息回到手里，就改投这里。
+// Class entry is a last-resort loop exit. It is not necessarily the complete
+// instance subclass chain used by native text/IME handlers.
 WNDPROC ClassProc(HWND h)
 {
     const WNDPROC cls = reinterpret_cast<WNDPROC>(::GetClassLongPtrW(h, GCLP_WNDPROC));
@@ -161,14 +163,23 @@ void TraceWindowMessage(HWND h, UINT msg, WPARAM w, WNDPROC previous)
 
 LRESULT ForwardToGame(HWND h, UINT msg, WPARAM w, LPARAM l, WNDPROC previous)
 {
-    // 同一条消息又回到我们手里（nest > 1）：前驱是那种「把消息再派回窗口」的东西，
-    // 继续喂它只会套娃。改投窗口类过程 —— 那才一定是游戏自己的窗口过程。
-    const int nest = NestOf(h, msg);
+    // Different arguments on the same message ID are legitimate nested delivery.
+    // Identical reentry may be a forwarding loop: keep class fallback bounded.
+    // The class procedure is a last resort, not the complete instance chain.
+    const int nest = NestOf(h, msg, w, l);
     if (nest > 1) {
         const WNDPROC cls = ClassProc(h);
         if (cls && cls != previous) {
-            if (nest == 2)
-                Log("wnd: 消息 0x%04X 又回到自己手里，改投窗口类过程", (unsigned)msg);
+            // Aggregate fallback diagnostics instead of writing on every mouse message.
+            static thread_local ULONGLONG nextLog = 0;
+            static thread_local unsigned suppressed = 0;
+            ++suppressed;
+            const ULONGLONG now = ::GetTickCount64();
+            if (nest == 2 && now >= nextLog) {
+                nextLog = now + 5000;
+                Log("wnd: exact-message fallback msg=0x%04X count=%u (5s rate limit)", (unsigned)msg, suppressed);
+                suppressed = 0;
+            }
             return ::CallWindowProcW(cls, h, msg, w, l);
         }
     }
@@ -609,8 +620,8 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l)
     struct DepthGuard {
         ~DepthGuard() { --g_wndDepth; }
     } depthGuard;
-    MsgNest nestGuard(h, msg);
-    const int nest = NestOf(h, msg);
+    MsgNest nestGuard(h, msg, w, l);
+    const int nest = NestOf(h, msg, w, l);
     const WNDPROC previous = PreviousProc(h);
     // Keep the predecessor available to synchronous reentry until forwarding
     // returns. Remove it on every exit path, including the recursion gates.

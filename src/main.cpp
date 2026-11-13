@@ -297,11 +297,22 @@ DWORD WINAPI Worker(LPVOID)
     Input in;
     if (!in.Init()) Log("XInput 没加载到，手柄快捷键不可用");
 
+    bool characterLinked = false;
+    std::uintptr_t linkedSaveBase = 0;
+    bool palicoRestorePending = false;
+    ULONGLONG palicoRestoreRetry = 0;
+    // Publishing options before association must not briefly reopen writers.
+    auto publishOptions = [&](bool resetFood = false) {
+        Config options = g_cfg;
+        options.enabled = options.enabled && characterLinked;
+        inq::ApplyOptions(options, resetFood);
+    };
     std::string report;
     bool ok;
     {
         std::lock_guard<std::mutex> lk(g_mx);
-        ok = inq::Install(g_cfg, report);
+        Config installConfig = g_cfg; installConfig.enabled = false;
+        ok = inq::Install(installConfig, report);
         g_model.ready = ok;
     }
     if (!report.empty()) Log("install report:\n%s", report.c_str());
@@ -385,7 +396,8 @@ DWORD WINAPI Worker(LPVOID)
             bool ok2 = false;
             {
                 std::lock_guard<std::mutex> lk(g_mx);
-                ok2 = inq::Install(g_cfg, again);
+                Config installConfig = g_cfg; installConfig.enabled = false;
+                ok2 = inq::Install(installConfig, again);
                 g_model.ready = ok2;
             }
             if (ok2) {
@@ -510,7 +522,7 @@ DWORD WINAPI Worker(LPVOID)
                 if (settings_transfer::ImportFile(settings_transfer::CurrentStorage(), source, m.backupsDir, g_cfg, backup, error)) {
                     m.reqSave = false;
                     dirtyAt = 0;
-                    inq::ApplyOptions(g_cfg, true); // Imported IDs must not retain the old effective meal.
+                    publishOptions(true); // Imported IDs must not retain the old effective meal.
                     i18n::Set(i18n::FromString(g_cfg.language));
                     hdr::Configure(g_cfg.hdr, g_cfg.sdrNits);
                     hk.Parse(g_cfg);
@@ -525,14 +537,73 @@ DWORD WINAPI Worker(LPVOID)
                     Chat(i18n::Fmt(i18n::Tr("Better-IN-Q：设置导入失败：%s", "Better-IN-Q: settings import failed: %s",
                                            "Better-IN-Q：設定取り込み失敗：%s"), error.c_str()));
                 }
-                inq::ApplyOptions(g_cfg);
+                publishOptions();
             }
+
+            // Associate profiles only after a stable, readable loaded character sample.
+            static profile::detail::AutoSlotTracker slotTracker;
+            static bool atTitle = false;
+            static ULONGLONG profileRetryAt = 0;
+            const bool titleNow = !sceneSample && StartupTitleSample();
+            if (titleNow && !atTitle) {
+                characterLinked = false;
+                palicoRestorePending = false; palicoRestoreRetry = 0;
+                inq::SetEnabled(false);
+                if (palico::EndCharacterSession())
+                    Log("palico: character session ended; old snapshot discarded, durable backups retained");
+            }
+            atTitle = titleNow;
+            std::uintptr_t saveRoot=0, saveBase=0;
+            std::uint64_t gameSlot=3;
+            const bool slotKnown = sceneSample &&
+                StartupRead(game::pSave, saveRoot) && saveRoot &&
+                StartupRead(saveRoot+0xA8, saveBase) && saveBase &&
+                StartupRead(saveRoot+0xA0, gameSlot) && gameSlot<3;
+            const int actualSlot = slotKnown ? int(gameSlot)+1 : 0;
+            const int settledSlot = slotTracker.Observe(actualSlot, saveBase, now);
+            if (actualSlot && (actualSlot != profile::Slot() ||
+                (linkedSaveBase && linkedSaveBase != saveBase))) characterLinked=false;
+            if (settledSlot) {
+                m.slot=actualSlot;
+                if (actualSlot != profile::Slot() && now >= profileRetryAt) {
+                    // Save old profile before publishing any action against the new character.
+                    profileRetryAt=now+5000;
+                    inq::SetEnabled(false);
+                    Config next=g_cfg;
+                    next.ClearLoadouts();
+                    std::string slotError;
+                    const auto target=profile::PathForSlot(actualSlot);
+                    if (SaveSplit(basePath,cfgPath,g_cfg) && LoadSplit(basePath,target,next,slotError)) {
+                        profile::SetSlot(actualSlot);
+                        cfgPath=target;
+                        g_cfg=std::move(next);
+                        characterLinked = true;
+                        publishOptions(true);
+                        m.reqRestart=m.reqResetOnly=m.reqApplyEquip=false;
+                        m.reqSave=false; dirtyAt=0;
+                        m.reqResetView=true;
+                        g_refreshNames=true;
+                        migrated=false; migrateTries=0;
+                        Log("profile: automatically associated game slot %d",actualSlot);
+                    } else {
+                        Log("profile: auto association failed: %s",slotError.c_str());
+                        Chat(i18n::Tr("Better-IN-Q：存档配置自动切换失败，已暂停游戏修改；稍后重试", "Better-IN-Q: profile switch failed; game changes paused, will retry", "Better-IN-Q：プロファイル切替失敗。変更を停止し再試行します"));
+                    }
+                }
+            }
+            const bool profileLinked = settledSlot && settledSlot==profile::Slot();
+            if (profileLinked) { characterLinked=true; linkedSaveBase=saveBase; }
+            // Stop old-character hooks and queued work during an unresolved switch.
+            if (actualSlot && !profileLinked && !characterLinked) inq::SetEnabled(false);
+            else if (profileLinked && g_cfg.enabled && !inq::Enabled()) publishOptions();
+            // Slot buttons cannot redirect a loaded character's configuration.
+            m.reqSlot=false;
 
             // UI 在渲染线程先改 Config、再提 reqSave；必须先发布状态过渡，避免同一帧关掉功能又执行旧请求。
             const runtime::Mode wantedMode = g_cfg.enabled ? runtime::Mode::Active : runtime::Mode::Dormant;
             if (wantedMode != runtimeMode) {
                 const runtime::TransitionPlan plan = runtime::PlanTransition(runtimeMode, wantedMode);
-                if (plan.enableInq) inq::ApplyOptions(g_cfg);
+                if (plan.enableInq) publishOptions();
                 else { inq::SetEnabled(false); }
                 if (plan.closePanel) SetPanel(false);   // 同时让四路输入过滤恢复，面板快捷键之后仍可再打开
                 if (plan.unblockInputs && g_blocked) SetPanel(false);
@@ -542,16 +613,19 @@ DWORD WINAPI Worker(LPVOID)
                 runtimeMode = wantedMode;
                 Log("runtime: %s", runtimeMode == runtime::Mode::Active ? "装载态" : "卸载态（业务旁路，钩子常驻）");
             }
-            // 读屏障随开关即时装卸；核心还没就绪时等下一次循环再装。
+            // BIQ专属道具命令随开关启用；不修改原生设置读取或菜单初始化。
             static bool barrierApplied = false, barrierKnown = false;
             const bool wantBarrier = runtimeMode == runtime::Mode::Active && g_cfg.itemAutoApply;
             if (inq::Ready() && (!barrierKnown || wantBarrier != barrierApplied)) {
-                inq::SetItemBarrier(wantBarrier);
+                if (!inq::SetItemBarrier(wantBarrier))
+                    Chat(i18n::Tr("Better-IN-Q：专属道具命令校验失败，将保留游戏原生确认；详情见日志",
+                                  "Better-IN-Q: private item command unavailable; native confirmation retained",
+                                  "Better-IN-Q：アイテム設定の切替が不完全です。ログを確認してください"));
                 barrierApplied = wantBarrier;
                 barrierKnown = true;
             }
 
-            const bool sceneActions = startupGate.AllowsActions() && !capturing;
+            const bool sceneActions = startupGate.AllowsActions() && !capturing && profileLinked;
             const runtime::HotkeyActions actions = runtime::GateHotkeys(runtimeMode, false,
                                                                        sceneActions && restartKey,
                                                                        sceneActions && resetKey);
@@ -580,12 +654,14 @@ DWORD WINAPI Worker(LPVOID)
                 }
                 inq::RequestRestart(g_cfg);
             };
-            auto palicoRestore = [&]() {
+            auto palicoRestore = [&]() -> bool {
                 std::string restoreError;
-                if (!palico::RestoreOriginal(std::filesystem::path(m.backupsDir) / L"palico", restoreError))
+                if (!palico::RestoreOriginal(std::filesystem::path(m.backupsDir) / L"palico", restoreError)) {
                     Chat(std::string("Better-IN-Q: Palico: ") + restoreError);
+                    return false;
+                }
+                return true;
             };
-            static bool palicoRestorePending = false;
             if (!open && actions.restart) { Log("hotkey: restart"); requestRestart(); }
             if (!open && actions.resetOnly) { Log("hotkey: reset only"); inq::RequestResetOnly(); palicoRestorePending = true; }
             if (!open && refillKey && runtimeMode == runtime::Mode::Active && sceneActions) {
@@ -596,20 +672,20 @@ DWORD WINAPI Worker(LPVOID)
             if (m.reqClose) { m.reqClose = false; SetPanel(false); }
             if (m.reqRestart) {
                 m.reqRestart = false;
-                if (runtimeMode == runtime::Mode::Active && startupGate.AllowsActions()) { Log("panel: restart"); requestRestart(); }
+                if (runtimeMode == runtime::Mode::Active && sceneActions) { Log("panel: restart"); requestRestart(); }
             }
             if (m.reqResetOnly) {
                 m.reqResetOnly = false;
-                if (runtimeMode == runtime::Mode::Active && startupGate.AllowsActions()) { Log("panel: reset only"); inq::RequestResetOnly(); palicoRestorePending = true; }
+                if (runtimeMode == runtime::Mode::Active && sceneActions) { Log("panel: reset only"); inq::RequestResetOnly(); palicoRestorePending = true; }
             }
             if (palicoRestorePending && g_cfg.palicoEnabled && runtimeMode == runtime::Mode::Active &&
-                startupGate.AllowsActions() && palico::AtBaseIdle() && inq::g.restart == 0) {
-                palicoRestorePending = false;
-                palicoRestore();
+                sceneActions && palico::AtBaseIdle() && inq::g.restart == 0 && now >= palicoRestoreRetry) {
+                palicoRestorePending = !palicoRestore();
+                palicoRestoreRetry = now + 5000;
             }
             if (m.reqApplyEquip) {
                 m.reqApplyEquip = false;
-                if (runtimeMode == runtime::Mode::Active && !m.reqSlot && !m.reqImportInq)
+                if (runtimeMode == runtime::Mode::Active && profileLinked && !m.reqSlot && !m.reqImportInq)
                     inq::RequestActiveSetEquipApply(g_cfg);
             }
             if (m.reqImportInq) {        // 设置页的文件选择框里挑好了 config.txt
@@ -623,7 +699,7 @@ DWORD WINAPI Worker(LPVOID)
                     // 原版存的是名字，我们存编号：趁现在游戏里的名单还在，换过来
                     const int lostNames = inq::NormalizeEquipItemNumbers(g_cfg);
                     // 导入把套装/猫饭整个换掉、编号重新发，生效值要跟着重算
-                    inq::ApplyOptions(g_cfg, true);
+                    publishOptions(true);
                     if (!SaveSplit(basePath, cfgPath, g_cfg)) Log("config: 存盘失败");
                     Log("import: %d 个全套（%s）", n, inotes.c_str());
                     Chat(i18n::Fmt(i18n::Tr("Better-IN-Q：从原版 IN-Q 导入了 %d 个全套",
@@ -642,33 +718,6 @@ DWORD WINAPI Worker(LPVOID)
                                             "Better-IN-Q：取り込みに失敗しました：%s"), ierr.c_str()));
                 }
             }
-            // 存档位是玩家在设置页选的（游戏里换档之后来点一下 1/2/3）
-            if (m.reqSlot) {
-                m.reqSlot = false;
-                const int want = m.slot;
-                if (want >= 1 && want <= 3 && want != profile::Slot()) {
-                    // 换存档只换「这个档里的东西」：面板设置写进共用的 base，跟着人走；
-                    // 套装和猫饭归存档——切到哪一档就读那一档的 profile，没配过就是空的。
-                    if (!SaveSplit(basePath, cfgPath, g_cfg)) Log("config: 存盘失败");
-                    inq::CancelPending(); // 丢弃旧存档的立即换装和其他未提交请求。
-                    profile::SetSlot(want);
-                    cfgPath = profile::ConfigPath();
-                    g_cfg.ClearLoadouts();
-                    {
-                        std::string serr;
-                        if (!LoadSplit(basePath, cfgPath, g_cfg, serr)) Log("config: %s", serr.c_str());
-                    }
-                    i18n::Set(i18n::FromString(g_cfg.language));
-                    hdr::Configure(g_cfg.hdr, g_cfg.sdrNits);
-                    hk.Parse(g_cfg);
-                    inq::ApplyOptions(g_cfg, true);
-                    m.reqSave = false;
-                    dirtyAt = 0;
-                    g_refreshNames = true;
-                    Log("profile: 切到存档 %d（保留面板设置；套装 %zu 猫饭 %zu）", want, g_cfg.sets.size(),
-                        g_cfg.foods.size());
-                }
-            }
             // 全局任务跟着「实际进去了的那一关」走：重开的和柜台自己接的都算。
             // 取消套用之后重开才不会退回更早手工选过的任务。
             if (g_cfg.enabled) {
@@ -684,7 +733,8 @@ DWORD WINAPI Worker(LPVOID)
             }
             if (m.reqSave) {             // 设置马上生效；写盘等停手 0.4 秒，免得打一个字存一次
                 m.reqSave = false;
-                inq::ApplyOptions(g_cfg);
+                g_refreshNames = true;
+                publishOptions();
                 dirtyAt = now;
             }
             if (dirtyAt && now - dirtyAt > 400) {
@@ -713,7 +763,7 @@ DWORD WINAPI Worker(LPVOID)
                 if (const int changed = inq::MigrateLoadoutRefs(g_cfg)) {
                     migrated = true;
                     if (!SaveSplit(basePath, cfgPath, g_cfg)) Log("config: 存盘失败");
-                    inq::ApplyOptions(g_cfg);
+                    publishOptions();
                     g_refreshNames = true;
                     Chat(i18n::Fmt(i18n::Tr("Better-IN-Q：老配置里的套装名字已换成编号（%d 处）；没对上的已留空，请到套装页重选",
                                             "Better-IN-Q: %d old name-based loadout references converted to numbers; unmatched ones are now empty, please re-pick them",
@@ -721,6 +771,9 @@ DWORD WINAPI Worker(LPVOID)
                                       changed));
                 }
             }
+            // ApplyOptions may have run for settings/import this frame; never open
+            // game writers until a character has actually been associated.
+            if (!characterLinked) inq::SetEnabled(false);
             if (now - lastTick >= 100) {
                 lastTick = now;
                 LARGE_INTEGER t0, t1;

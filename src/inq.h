@@ -55,7 +55,8 @@ void RequestRestart(const Config& cfg);
 // 调用方只应响应显式选择事件；切 profile/slot/载入配置不要自动调用，需 CancelPending。
 // SetEnabled(false) 会排空发布者/回调并清队列，重新启用不会补做卸载态的选择。
 bool RequestEquipApply(const Config& cfg, const std::string& equip);
-// 安全据点沿用上述仅装备行为；明确局内/探索且不在加载时仅排道具+联动快捷栏，
+// 安全据点同时排装备和 BIQ 道具命令；主动道具套用不受自动套用开关控制。
+// 明确局内/探索且不在加载时仅排道具+联动快捷栏，
 // 未知/加载拒绝并取消本次待办，消费前再验同一状态。重开原队列不受此限制。
 // 不排装备、不改猫饭或任务；worker 路径三语风险提示每进程仅一次。
 // activeSet 为空/不存在时仅取消未提交的立即装备待办，不脱装备。
@@ -69,9 +70,9 @@ void RequestResetOnly();
 // 会核对当前袋里每个格子的 id 已经是该套装的 id，没换好就等 2 秒再放弃。
 bool RequestPouchRefill(const Config& cfg);
 
-// 道具套装的“读屏障”可运行时开关：打开时把三处 save+0x140415 的读取固定为 1，
-// 关闭时恢复原始字节；不需要重启游戏。
-void SetItemBarrier(bool on);
+// 历史接口名保留：现在仅启用 BIQ 专属道具命令（免确认并联动快捷栏）。
+// 不再改写游戏代码、设置读取或原生菜单；关闭后沿用原生命令。
+bool SetItemBarrier(bool on);
 
 // 每 100ms 调一次（CT 里 Lua 定时器做的事）
 void Tick(const Config& cfg);

@@ -2704,22 +2704,21 @@ void PageSettings(Model& m)
         const int slots[3] = {1, 2, 3};
         const float gap = 10 * S;
         const float bw = (ImGui::GetContentRegionAvail().x - gap * 2) / 3;
+        ImGui::BeginDisabled(); // Status indicators, not manual profile selectors.
         for (int i = 0; i < 3; ++i) {
             if (i) ImGui::SameLine(0, gap);
             const std::string id = "##slot" + std::to_string(slots[i]);
             const std::string label = std::to_string(slots[i]);
             const bool on = m.slot == slots[i];
-            if (PillButton(id.c_str(), label.c_str(), bw, 44 * S, on ? kPrimary : kSecondary) && !on) {
-                m.slot = slots[i];
-                m.reqSlot = true;
-            }
+            PillButton(id.c_str(), label.c_str(), bw, 44 * S, on ? kPrimary : kSecondary);
         }
+        ImGui::EndDisabled();
     }
     ImGui::Dummy(ImVec2(0, 2 * S));
     Text(fReg, szSmall, kFaint,
-         i18n::Tr("游戏里换存档之后来这里切一下；套装和猫饭按存档分开存",
-                  "switch here after changing save slot; per-slot data",
-                  "ゲームでスロットを変えたらここで切り替え。セットはスロットごとに保存されます"),
+         i18n::Tr("载入角色后自动对应存档；套装和猫饭按存档分开存",
+                  "auto-linked after character load; per-slot data",
+                  "キャラクター読込後に自動切替。セットはスロットごとに保存されます"),
          true);
     ImGui::Dummy(ImVec2(0, 14 * S));
 

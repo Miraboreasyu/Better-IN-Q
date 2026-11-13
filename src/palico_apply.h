@@ -43,6 +43,8 @@ Result Apply(const Options&, const std::filesystem::path& backupDirectory);
 // Captured once before the first apply, restored when the player returns to base.
 struct SaveOriginal {
     std::uint32_t deploy = 0, xp = 0, gadgetXp[6] = {};
+    std::uintptr_t slot = 0;
+    int slotIndex = -1;
     bool valid = false;
 };
 bool CaptureSaveFields(const ApplyBackend&, const ApplyContext&, SaveOriginal& out);
@@ -50,6 +52,9 @@ Result RestoreWithBackend(const SaveOriginal&, const std::filesystem::path&, con
 // Process-wide native capture/restore (idempotent capture; restore clears it).
 bool CaptureOriginal(std::string& error);
 bool RestoreOriginal(const std::filesystem::path& backupDirectory, std::string& error);
+// A title-screen boundary ends the character session, even if a new character
+// later occupies the same slot address. Never replay an old-session snapshot.
+bool EndCharacterSession();
 // Base-and-idle check plus the game's own palico loadout apply, without
 // touching save data. Used after a restart, because the restart reloads the
 // save and would otherwise discard an in-memory equipment change.

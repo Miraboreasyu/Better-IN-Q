@@ -569,7 +569,7 @@ bool LoadSplit(const std::wstring& basePath, const std::wstring& profPath, Confi
                        "設定の分割に失敗しました。元の base 設定は保持されています");
         return false;
     }
-    if (!LoadConfig(profPath, cfg, err)) { cfg = fromBase; return true; }
+    if (!LoadConfig(profPath, cfg, err)) { cfg = fromBase; return false; }
     const Config fromProf = cfg;
     // base 管面板设置，profile 管套装/猫饭/当前选中，两边合起来才是完整配置。
     cfg = fromBase;

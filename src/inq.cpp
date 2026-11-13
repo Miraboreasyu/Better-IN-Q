@@ -36,6 +36,36 @@ bool g_ready = false;
 // 运行时总闸：钩子永久驻留，Dormant 时所有游戏侧回调纯旁路。
 std::atomic<bool> g_enabled{false};
 std::atomic<bool> g_palicoEnabled{false};
+// Only commands constructed by BIQ use this private callable table. Native UI
+// commands and all three reads of save+140415 remain completely unchanged.
+std::atomic<bool> g_itemCommandOverride{false};
+struct ItemCommand { std::uintptr_t table; std::uint32_t index, mode; };
+static_assert(sizeof(ItemCommand) == 16, "game small-callable storage is 16 bytes");
+using ItemCommandInvoke = void (*)(const ItemCommand*, void*, std::uintptr_t*);
+using ItemApply = void (*)(std::uintptr_t, int, int);
+ItemApply g_itemApply = nullptr;
+ItemCommandInvoke g_itemOriginalInvoke = nullptr;
+alignas(16) std::uintptr_t g_itemCommandTable[6]{};
+ItemCommand* CopyItemCommand(const ItemCommand* source, ItemCommand* target)
+{
+    *target = *source;
+    return target;
+}
+constexpr std::uint32_t kExplicitHubItem = 0x80000000u;
+bool EnsureItemCommand();
+bool ItemCommandContext();
+bool SafeImmediateEquip();
+std::atomic<int> g_departureItem{0};
+std::atomic<std::uintptr_t> g_departureSlot{0};
+std::atomic<bool> g_departureItemsEnabled{false};
+std::atomic<bool> g_restartItemFromHub{false};
+std::atomic<int> g_restartDepartureItem{0};
+std::atomic<std::uintptr_t> g_restartDepartureSlot{0};
+void ApplyDepartureItems(int display, std::uintptr_t slot);
+void OnRestartItemDeparture();
+void OnItemDeparture(Ctx*);
+void InvokeItemCommand(const ItemCommand*, void*, std::uintptr_t*);
+
 std::atomic<unsigned> g_inflight{0};
 // 汇编 call gate 不能直接操作 std::atomic；用 Interlocked 指令维护这两个 32 位闸门。
 alignas(4) volatile std::int32_t g_gateEnabled = 0;
@@ -55,6 +85,29 @@ public:
 private:
     bool active_ = false;
 };
+
+void InvokeItemCommand(const ItemCommand* command, void* arg, std::uintptr_t* owner)
+{
+    ActiveCall call;
+    // A queued BIQ callable can be consumed after reset has begun. Never fall
+    // through to the native GUI handler during that unsafe window.
+    if (call && !ItemCommandContext()) {
+        Log("item command: discarded during reset/loading or unknown scene");
+        return;
+    }
+    if (call && ((command->mode & kExplicitHubItem) || g_itemCommandOverride.load(std::memory_order_acquire)) &&
+        g_enabled.load(std::memory_order_acquire) && command->index < 80 &&
+        owner && *owner && Rd<std::uintptr_t>(*owner) == EXE + 0x3460220 && g_itemApply) {
+        // 141d37cc0 -> 141d3a2c0 -> 141d38110. Third argument 0 is
+        // the native 'yes / include radial' path, 1 leaves radial unchanged.
+        if ((command->mode & kExplicitHubItem) && !SafeImmediateEquip()) return;
+        g_itemApply(*owner, int(command->index), (command->mode & ~kExplicitHubItem) ? 1 : 0);
+        return;
+    }
+    // Queued before disabling: retain the native callable contract, including
+    // the user's own confirmation policy. Never broaden a native request.
+    if (g_itemOriginalInvoke) g_itemOriginalInvoke(command, arg, owner);
+}
 
 // 「刚进去的那一关」。游戏自己记着最后一次进的任务（不管是我们重开的还是玩家在柜台接的），
 // Tick 里发现变了就存进来，主循环用 TakeEnteredQuest() 取走、写进全局任务。
@@ -78,6 +131,17 @@ bool SafeImmediateEquip()
     const std::uintptr_t load = ui ? P(ui + 0x20) : 0;
     return q && Readable(q + 0x38, 4) && Rd<std::uint32_t>(q + 0x38) == 1 &&
            load && Readable(load + 0x1D04, 4) && Rd<std::uint32_t>(load + 0x1D04) == 0;
+}
+
+bool ItemCommandContext()
+{
+    if (g.restart != 0) return false;
+    const auto q = P(pQuest);
+    const auto ui = Ui();
+    const auto load = ui ? P(ui + 0x20) : 0;
+    if (!q || !Readable(q + 0x38, 4) || !load || !Readable(load + 0x1D04, 4)) return false;
+    const auto stage = Rd<std::uint32_t>(q + 0x38);
+    return (stage == 1 || stage == 2 || stage == 0xD) && Rd<std::uint32_t>(load + 0x1D04) == 0;
 }
 
 // Worker request paths only; never invoke the game's chat function in a hook.
@@ -283,6 +347,7 @@ void OnQuestLoad(Ctx* c)
         c->rax = r;
         if (Rd<std::uint8_t>(o + 0x2298) == 0xEA) { Stop(c, r); return; }
         if (Rd<std::uint32_t>(r + 0x28F0) == 0) return;
+        OnRestartItemDeparture(); // before BIQ starts departure; no arrival fallback
         Wr<std::uint32_t>(r + 0x28F0, 8);                              // 出发
         const std::uintptr_t q = P(pQuest);
         c->rbx = q;
@@ -479,6 +544,15 @@ bool Install(const Config& cfg, std::string& report)
         PatchValue<float>(kBlackOut2, 0.5f, 0.1f, "转场黑屏2", report);
     }
 
+    // Original speedrun_util identifies this as uGUIQuestPrepare::depart.
+    // Intercept before its first instruction, while the hub UI is still alive.
+    const auto depart = hook::FindAll(tb, tl,
+        "48 89 5C 24 20 55 48 83 EC 40 48 8B E9 C6 81 84 2B 00 00 00");
+    static const std::uint8_t departHead[] = {0x48,0x89,0x5C,0x24,0x20};
+    if (depart.size()!=1 || !hook::InstallCtxHook(depart[0],5,OnItemDeparture,departHead,sizeof(departHead))) {
+        report += "Departure item hook unavailable; departure auto-apply disabled.\n";
+        Log("item departure: hook unavailable (%zu matches)",depart.size());
+    } else Log("item departure: pre-depart hook installed");
     ApplyOptions(cfg);
     g_ready = core;
     return core;
@@ -492,6 +566,7 @@ void ApplyOptions(const Config& cfg, bool resetFood)
     if (!cfg.enabled) SetEnabled(false);
     g_palicoEnabled.store(cfg.palicoEnabled, std::memory_order_release);
     if (!cfg.palicoEnabled) g.palicoLoadout = 0;
+    g_departureItemsEnabled.store(cfg.itemAutoApply && cfg.enabled, std::memory_order_release);
     g.optReset = cfg.reset ? 1 : 0;
     g.optAcceptOnly = cfg.acceptOnly ? 1 : 0;
     g.optWyvern = cfg.wyvern ? 1 : 0;
@@ -621,6 +696,7 @@ int ResolveItem(const std::string& s)
 // ---------------------------------------------------------------------------
 namespace {
 int g_pendingSetItem = 0;
+bool g_explicitHubItem = false;
 bool g_immediateSetItem = false; // worker-owned; distinguishes restart QueueSet
 std::uint32_t g_immediateItemStage = 0;
 
@@ -636,6 +712,33 @@ bool ItemSelectionContext(std::uint32_t& stage)
 }
 bool g_pendingLink = false;
 bool g_hasPendingLink = false;
+
+// Only a positively observed hub can arm one quest-entry apply. Loading in
+// the same quest never arms another one, even after ResetOnly clears restart.
+struct ItemEntryTracker {
+    std::uintptr_t slot = 0;
+    bool armed = false;
+    int stableStage = 0;
+    std::uint64_t since = 0;
+    void Reset() { *this = {}; }
+    void BeginReset(bool fromHub, std::uintptr_t currentSlot) {
+        Reset(); slot = currentSlot; armed = fromHub && currentSlot != 0;
+    }
+    bool Observe(int stage, bool idle, bool restarting, std::uintptr_t currentSlot, std::uint64_t now) {
+        if (!currentSlot || currentSlot != slot) { Reset(); slot = currentSlot; }
+        if (!currentSlot || !idle || restarting || (stage != 1 && stage != 2 && stage != 0xD)) {
+            stableStage = 0; since = now; return false;
+        }
+        if (stableStage != stage) { stableStage = stage; since = now; return false; }
+        if (now - since < 500) return false;
+        if (stage == 1) { armed = true; return false; }
+        if (!armed) return false;
+        armed = false;
+        return true;
+    }
+};
+ItemEntryTracker g_itemEntry;
+
 // 局内套用道具套装后补回被消耗的数量：套装记录里的数量是「满」的参考值。
 // 只对当前袋里 id 已经变成该套装的格子补，绝不动别的格子。
 struct RefillPlan { std::uintptr_t slot = 0; int store = 0; std::uint64_t deadline = 0; bool fillEmpty = false; bool requireAll = false; };
@@ -748,10 +851,16 @@ void ClearPendingAfterDrain()
     g.palicoLoadout = 0;
     g.itemLoadout = 0;
     g_pendingEquipApply.store(0, std::memory_order_release);
-    g_pendingSetItem = 0;
+    g_pendingSetItem = 0; g_explicitHubItem = false;
     g_immediateSetItem = false;
     g_refillPlan = {};
     g_refillRequest.store(false, std::memory_order_release);
+    g_itemEntry.Reset();
+    g_restartItemFromHub.store(false, std::memory_order_release);
+    g_restartDepartureItem.store(0, std::memory_order_release);
+    g_restartDepartureSlot.store(0, std::memory_order_release);
+    g_departureItem.store(0, std::memory_order_release);
+    g_departureSlot.store(0, std::memory_order_release);
     g_deferredUnsafeEquipWarning.store(false, std::memory_order_release);
     g_pendingLink = false;
     g_hasPendingLink = false;
@@ -794,7 +903,7 @@ void SetEnabled(bool enabled)
 void QueueSet(const LoadoutSet& s)
 {
     if (g_immediateSetItem) {
-        g_pendingSetItem = 0;
+        g_pendingSetItem = 0; g_explicitHubItem = false;
         g_hasPendingLink = false;
         g_immediateSetItem = false;
     }
@@ -836,12 +945,28 @@ bool RequestActiveSetEquipApply(const Config& cfg)
     if (!call || !cfg.enabled || !g_ready) return false;
     if (g.restart != 0) return false; // never overwrite the intentional restart queue
     if (g_immediateSetItem) {
-        g_pendingSetItem = 0;
+        g_pendingSetItem = 0; g_explicitHubItem = false;
         g_hasPendingLink = false;
         g_immediateSetItem = false;
     }
     const LoadoutSet* s = cfg.activeSet > 0 ? cfg.FindSetById(cfg.activeSet) : nullptr;
-    if (!s || SafeImmediateEquip()) return RequestEquipApply(cfg, s ? s->equip : std::string());
+    g_explicitHubItem = false;
+    if (!s) return RequestEquipApply(cfg, std::string());
+    if (SafeImmediateEquip()) {
+        const bool equipOk = RequestEquipApply(cfg, s->equip);
+        const int item = s->item.empty() ? 0 : ResolveItem(s->item);
+        if (item && !EnsureItemCommand()) {
+            Log("item selection: BIQ callable unavailable; item request rejected");
+            return false;
+        }
+        g_pendingSetItem = item;
+        g_immediateSetItem = item != 0;
+        g_immediateItemStage = 1;
+        g_explicitHubItem = item != 0;
+        g_pendingLink = s->linkRadial;
+        g_hasPendingLink = item != 0;
+        return equipOk && (s->item.empty() || item != 0);
+    }
     // Deliberate restart QueueSet is a different path: never alter its queued
     // equipment here. Ordinary active-set selection in the field is item-only.
     g_pendingEquipApply.store(0, std::memory_order_release);
@@ -874,6 +999,17 @@ void RequestRestart(const Config& cfg)
                                      "Better-IN-Q: no loadout #%d in the config",
                                      "Better-IN-Q：設定にセット番号 %d がありません"), cfg.activeSet));
     }
+    // Do not queue a GUI item command alongside reset/departure. Hub-origin
+    // restarts apply immediately before BIQ departure; field-origin restarts never do.
+    const bool fromHub = SafeImmediateEquip();
+    const auto originSlot = SaveSlot();
+    const auto selected = cfg.FindSetById(cfg.activeSet);
+    g_restartItemFromHub.store(fromHub, std::memory_order_release);
+    g_restartDepartureSlot.store(originSlot, std::memory_order_release);
+    g_restartDepartureItem.store(selected ? ResolveItem(selected->item) : 0, std::memory_order_release);
+    g_itemEntry.BeginReset(fromHub, originSlot);
+    g_pendingSetItem = 0; g_explicitHubItem = false; g_immediateSetItem = false; g_hasPendingLink = false;
+    g_refillPlan = {}; g_refillRequest.store(false, std::memory_order_release);
     g_restartWatchdog.Reset();
     g.restart = 1;
 }
@@ -891,6 +1027,11 @@ void RequestResetOnly()
         return;
     }
     if (g.restart != 0) return;
+    g_restartItemFromHub.store(false, std::memory_order_release);
+    g_restartDepartureItem.store(0, std::memory_order_release);
+    g_itemEntry.BeginReset(false, SaveSlot());
+    g_pendingSetItem = 0; g_explicitHubItem = false; g_immediateSetItem = false; g_hasPendingLink = false;
+    g_refillPlan = {}; g_refillRequest.store(false, std::memory_order_release);
     g.optResetOnly = 1;
     g_restartWatchdog.Reset();
     g.restart = 1;
@@ -904,29 +1045,83 @@ bool RequestPouchRefill(const Config& cfg)
     return true;
 }
 
-void SetItemBarrier(bool on)
+namespace {
+bool EnsureItemCommand()
 {
-    if (!g_ready) return;
-    struct Site { std::uintptr_t addr; std::uint64_t orig; std::uint64_t barrier; };
-    static const Site kSites[] = {
-        {kItemSetRead1, 0x840014041588B60FULL, 0x84909000000001B9ULL},
-        {kItemSetRead2, 0x00140415B8B60F44ULL, 0x909000000001BF41ULL},
-        {kItemSetRead3, 0x480014041588B60FULL, 0x48909000000001B9ULL},
-    };
-    for (const Site& s : kSites) {
-        std::uint64_t cur = 0;
-        std::memcpy(&cur, reinterpret_cast<const void*>(s.addr), sizeof(cur));
-        const std::uint64_t to = on ? s.barrier : s.orig;
-        const std::uint64_t other = on ? s.orig : s.barrier;
-        if (cur == to) continue;
-        if (cur != other) {
-            Log("item barrier: %p 字节不是已知状态（%016llX），跳过", (void*)s.addr,
-                static_cast<unsigned long long>(cur));
-            continue;
-        }
-        if (!hook::WriteMem(s.addr, &to, sizeof(to))) Log("item barrier: %p 写入失败", (void*)s.addr);
+    if (!g_ready) return false;
+    // No executable patching. Verify the original command ABI before publishing
+    // a private copy of its six-entry callable vtable.
+    const std::uintptr_t table = kItemLoadoutCmd;
+    const std::uint8_t applyHead[] = {0x48,0x89,0x5C,0x24,0x08,0x48,0x89,0x74,0x24,0x10};
+    if (!Readable(table, sizeof(g_itemCommandTable)) ||
+        Rd<std::uintptr_t>(table) != EXE + 0x1D37230 ||
+        Rd<std::uintptr_t>(table + 8) != EXE + 0x1D37230 ||
+        Rd<std::uintptr_t>(table + 0x10) != EXE + 0x1D37CC0 ||
+        !Readable(EXE + 0x1D38110, sizeof(applyHead)) ||
+        std::memcmp(reinterpret_cast<const void*>(EXE + 0x1D38110), applyHead, sizeof(applyHead))) {
+        Log("item command: original callable/apply contract mismatch; override disabled");
+        return false;
     }
-    Log("item barrier: %s", on ? "开" : "关");
+    if (!g_itemApply) {
+        std::memcpy(g_itemCommandTable, reinterpret_cast<const void*>(table), sizeof(g_itemCommandTable));
+        g_itemOriginalInvoke = reinterpret_cast<ItemCommandInvoke>(g_itemCommandTable[2]);
+        g_itemCommandTable[0] = g_itemCommandTable[1] = reinterpret_cast<std::uintptr_t>(&CopyItemCommand);
+        g_itemCommandTable[2] = reinterpret_cast<std::uintptr_t>(&InvokeItemCommand);
+        g_itemApply = reinterpret_cast<ItemApply>(EXE + 0x1D38110);
+    }
+    return true;
+}
+
+} // namespace
+
+namespace {
+void ApplyDepartureItems(int display, std::uintptr_t originSlot)
+{
+    if (!g_departureItemsEnabled.load(std::memory_order_acquire) || !SafeImmediateEquip()) return;
+    const auto slot = SaveSlot();
+    if (!slot || slot != originSlot || display < 1 || display > 80) return;
+    const int store = ItemStoreOfDisplay(slot,display);
+    if (!store || !Rd<std::uint32_t>(slot + std::uintptr_t(store)*0x768 + 0x278)) return;
+    const auto ui = Ui();
+    const auto owner = ui ? P(ui + 0x170) : 0;
+    if (!owner || Rd<std::uintptr_t>(owner) != EXE + 0x3460220 || !EnsureItemCommand()) {
+        Log("item departure: item GUI/ABI unavailable; skipped before departure");
+        return;
+    }
+    // This is the same native yes/include-radial implementation as BIQ's
+    // private callable, not a queued command consumed later during loading.
+    g_itemApply(owner,display-1,0);
+    Log("item departure: native apply returned for loadout %d before departure",display);
+}
+void OnRestartItemDeparture()
+{
+    // Snapshot the origin at the accepted Restart request, not at eventual
+    // departure: a field-origin restart may pass through a hub too.
+    if (!g_restartItemFromHub.exchange(false, std::memory_order_acq_rel)) return;
+    const int display = g_restartDepartureItem.exchange(0, std::memory_order_acq_rel);
+    ApplyDepartureItems(display, g_restartDepartureSlot.load(std::memory_order_acquire));
+}
+void OnItemDeparture(Ctx*)
+{
+    ActiveCall call;
+    if (!call) return;
+    if (g.restart != 0) {
+        OnRestartItemDeparture();
+        return;
+    }
+    ApplyDepartureItems(g_departureItem.load(std::memory_order_acquire),
+                        g_departureSlot.load(std::memory_order_acquire));
+}
+} // namespace
+
+bool SetItemBarrier(bool on)
+{
+    g_itemCommandOverride.store(false, std::memory_order_release);
+    if (!on) return true;
+    if (!EnsureItemCommand()) return false;
+    g_itemCommandOverride.store(true, std::memory_order_release);
+    Log("item command: BIQ-only direct apply enabled; native setting reads untouched");
+    return true;
 }
 
 std::vector<NamedLoadout> ListEquipLoadouts()
@@ -952,12 +1147,13 @@ std::vector<NamedLoadout> ListPalicoLoadouts()
     for (int n = 1; n <= 24; ++n) {
         const std::uintptr_t record = slot + 0x13B574 + std::uintptr_t(n - 1) * 0x130;
         // DLL 9e00: +0x100 is the saved weapon, -1 denotes an empty record.
-        // Names occupy the first 64 bytes; omit blank/empty slots entirely.
+        // Weapon validity defines an occupied record; an empty name is valid.
         if (!Readable(record, 0x104) || Rd<std::uint32_t>(record + 0x100) == 0xFFFFFFFFu) continue;
         char name[65] = {};
         std::memcpy(name, reinterpret_cast<const void*>(record), 64);
-        if (name[0] == 0 || std::string(name).find_first_not_of(" \t\r\n") == std::string::npos) continue;
-        result.push_back({n, name, n});
+        const std::string text(name);
+        const bool blank = text.find_first_not_of(" \t\r\n") == std::string::npos;
+        result.push_back({n, blank ? std::string(i18n::Tr("随从套装 ", "Palico loadout ", "オトモセット ")) + std::to_string(n) : text, n});
     }
     return result;
 }
@@ -1054,8 +1250,8 @@ void Tick(const Config& cfg)
     if (!cfg.enabled) return;
     if (g_deferredUnsafeEquipWarning.exchange(false, std::memory_order_acq_rel)) WarnUnsafeEquipOnce();
     std::uint32_t itemStage = 0;
-    if (g_immediateSetItem && (!ItemSelectionContext(itemStage) || itemStage != g_immediateItemStage)) {
-        g_pendingSetItem = 0;
+    if (g_immediateSetItem && (g_explicitHubItem ? !SafeImmediateEquip() : (!ItemSelectionContext(itemStage) || itemStage != g_immediateItemStage))) {
+        g_pendingSetItem = 0; g_explicitHubItem = false;
         g_immediateSetItem = false;
         g_hasPendingLink = false;
     }
@@ -1067,24 +1263,23 @@ void Tick(const Config& cfg)
     const std::uintptr_t piui = P(pui + 0x170);
     const std::uintptr_t slot = SaveSlot();
 
-    // 玩家自己接任务 / 加入救援时也套一次道具套装：袋子和快捷栏登录一起切。
-    static bool wasInQuest = false;
-    std::uint32_t questStage = 0;
-    const bool inQuest = ItemSelectionContext(questStage);
-    if (inQuest && !wasInQuest && cfg.itemAutoApply) {
-        const LoadoutSet* active = nullptr;
-        for (const auto& s : cfg.sets) if (s.id == cfg.activeSet) { active = &s; break; }
-        const int display = active ? ResolveItem(active->item) : 0;
-        const int st = (slot && display > 0) ? ItemStoreOfDisplay(slot, display) : 0;
-        if (st) {
-            g_pendingSetItem = display;
-            g_immediateSetItem = false;
-        }
-    }
-    wasInQuest = inQuest;
+    // Observe loading even when the command UI disappears: a loading edge is
+    // not a new quest. Only a stable hub -> stable quest transition can apply.
+    const auto q = P(pQuest);
+    const int stage = q && Readable(q + 0x38, 4) ? int(Rd<std::uint32_t>(q + 0x38)) : 0;
+    const bool idle = pload && Readable(pload + 0x1D04, 4) && Rd<std::uint32_t>(pload + 0x1D04) == 0;
+    // Publish a slot-bound selection, but never submit on arrival. The actual
+    // call runs on the game's GUI thread immediately before normal departure.
+    g_departureItem.store(0, std::memory_order_release);
+    const LoadoutSet* departureSet = cfg.FindSetById(cfg.activeSet);
+    const int departureDisplay = departureSet ? ResolveItem(departureSet->item) : 0;
+    g_departureSlot.store(slot, std::memory_order_release);
+    g_departureItem.store(departureDisplay, std::memory_order_release);
+    const bool canSubmitItem = idle && g.restart == 0 &&
+        (stage == 1 || stage == 2 || stage == 0xD);
 
     // 手动补全快捷键：只补当前套装的道具数量，不换套装。
-    if (g_refillRequest.exchange(false)) {
+    if (g_refillRequest.exchange(false) && canSubmitItem) {
         const LoadoutSet* active = nullptr;
         for (const auto& s : cfg.sets) if (s.id == cfg.activeSet) { active = &s; break; }
         const int display = active ? ResolveItem(active->item) : 0;
@@ -1101,21 +1296,29 @@ void Tick(const Config& cfg)
     }
 
     // 道具套装（通过 UI 命令让游戏自己套用）
-    if (g_pendingSetItem > 0 && slot && piui) {
+    if (g_pendingSetItem > 0 && slot && piui && canSubmitItem) {
         g_immediateSetItem = false;
         const int n = g_pendingSetItem;                    // 显示编号（套用命令要它）
-        g_pendingSetItem = 0;
+        const bool forcedHub = g_explicitHubItem;
+        g_pendingSetItem = 0; g_explicitHubItem = false;
         const int st = ItemStoreOfDisplay(slot, n);         // 数据真正在哪一格
         const std::uint32_t valid = st ? Rd<std::uint32_t>(slot + std::uintptr_t(st) * 0x768 + 0x278) : 0;
         if (valid != 0) {
-            if (g_hasPendingLink) {
+            const bool ownCommand = forcedHub || g_itemCommandOverride.load(std::memory_order_acquire);
+            if (g_hasPendingLink && !ownCommand) {
                 g_savedRadial = Rd<std::uint8_t>(slot + 0x140415);
                 g_savedRadialSlot = slot;
                 Wr<std::uint8_t>(slot + 0x140415, g_pendingLink ? 1 : 2);
                 g_hasPendingLink = false;
             }
-            Wr<std::uint64_t>(uib + 0x4F60, kItemLoadoutCmd);
-            Wr<std::uint64_t>(uib + 0x4F68, (std::uint64_t)(n - 1));
+            // Publish the mode inside our callable, not in the user's save.
+            // Auto-apply intentionally includes radial even when linkRadial is off.
+            Wr<std::uint64_t>(uib + 0x4F60, ownCommand
+                ? reinterpret_cast<std::uintptr_t>(g_itemCommandTable) : kItemLoadoutCmd);
+            Wr<std::uint64_t>(uib + 0x4F68, (std::uint64_t)(n - 1) |
+                (forcedHub ? (std::uint64_t(kExplicitHubItem) << 32) : 0));
+            g_explicitHubItem = false;
+            if (ownCommand) g_hasPendingLink = false;
             Wr<std::uint64_t>(uib + 0x4F98, uib + 0x4F60);
             Wr<std::uint64_t>(uib + 0x4FA0, piui);
             Wr<std::uint64_t>(uib + 0x4FA8, uib + 0xF6B0);
@@ -1137,7 +1340,8 @@ void Tick(const Config& cfg)
         }
     }
 
-    ServiceItemRefill(slot, ::GetTickCount64());
+    if (canSubmitItem) ServiceItemRefill(slot, ::GetTickCount64());
+    else g_refillPlan = {};
 
     // 猫饭：只在明确选中预设时于读盘期间写入（CT：pfood+19A4+i*4，i=1..8）。
     // 未选（0/-1）不覆盖；数值相同不能证明是我们写的，也可能是玩家手动吃的。

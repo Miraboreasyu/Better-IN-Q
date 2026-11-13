@@ -9,6 +9,7 @@
 // 老的单份 BetterINQ.ini 不删，第一次进某个档案时复制一份过去当底子。
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -22,6 +23,19 @@ void Init(const std::wstring& pluginDir);
 const std::string& SteamId();
 
 namespace detail {
+// Only a continuously observed loaded character may select a profile.
+// Missing reads and relocated save bases restart the settling interval.
+class AutoSlotTracker {
+    int slot_ = 0;
+    std::uintptr_t base_ = 0;
+    std::uint64_t since_ = 0;
+public:
+    int Observe(int slot, std::uintptr_t base, std::uint64_t now) {
+        if (slot < 1 || slot > 3 || !base) { slot_=0; base_=0; since_=now; return 0; }
+        if (slot != slot_ || base != base_) { slot_=slot; base_=base; since_=now; }
+        return now >= since_ && now-since_ >= 500 ? slot_ : 0;
+    }
+};
 // 纯函数：不访问注册表/文件，便于隔离测试。userdataAccounts 是有本游戏目录的账号 ID。
 // malformed/冲突的登录记录拒绝猜测；多 userdata 账号不按目录时间挑选。
 std::string SelectSteamId(unsigned long activeAccount, const std::string& loginUsers,

@@ -67,7 +67,7 @@ L3 / R3 表示按下左 / 右摇杆。手柄按键名称采用 Xbox 标识。
 
 据点中套用后可更换装备；任务或探索中切换仅更换道具，不动装备和猫饭。局内如需换装备，请自行前往帐篷。
 据点、任务或探索中切换道具套装后，会把这套里已被消耗的道具数量补回套装记录的数量。
-套用道具套装时不再弹出“是否同时套用快捷栏”的确认，固定按“是”处理，快捷栏与道具一起切换。
+自动套用开启时，只有 Better-IN-Q 提交的道具命令免确认并联动快捷栏；不修改游戏原生菜单的读取指令或玩家设置。
 设置页的「进任务自动套用道具」默认开启：进任务、加入救援时自动套用当前套装并跳过上面的确认；关闭后不再自动套用，也就不会有这个确认框。开关立即生效，从下一次套用开始。
 自己接任务、加入别人的任务或救援时，会按当前套装重新套用一次道具套装，所以道具袋、快捷栏登录和排列都会一起切过去；用光还没合成的道具也会补回来。
 打开开关后，随时按补满道具快捷键（默认 F6）也做同样的事。
@@ -144,7 +144,8 @@ L3 / R3 表示按下左 / 右摇杆。手柄按键名称采用 Xbox 标识。
    打开面板的快捷键至少保留一个入口。
 
 存档位：
-游戏内切换角色存档后，在这里选择对应的 1 / 2 / 3。
+载入角色后会自动对应游戏的 1 / 2 / 3 存档位，这里只显示当前档，不再手动切换。
+识别不到角色或切换配置失败时，不会猜成第 1 档；切换期间暂停游戏修改，失败后会稍后重试。
 套装和猫饭按存档位分别保存；语言、快捷键等面板设置不随存档位切换。
 
 设置备份与恢复：
@@ -232,7 +233,7 @@ During loading or an unknown game state, this change is not submitted. Select ag
 Items, meals and quests take effect on a subsequent restart or quest entry, as appropriate.
 Switching an item loadout (at base, in a quest or on an expedition) refills the counts of that loadout's own items back to the amounts stored in it.
 Joining a quest, another player's quest or an SOS re-applies the active item loadout, so the pouch, item-bar registrations and their order all switch together; items that were used up and not re-crafted come back too.
-Applying an item loadout no longer asks whether to switch the shortcut bar; it always answers “yes” and switches both together.
+With auto-apply enabled, only Better-IN-Q item commands skip confirmation and include the shortcut bar. Native menus and saved settings are unchanged.
 “Auto-apply items on quest entry” is on by default: entering a quest or joining an SOS applies the active loadout and skips that prompt. Turning it off stops the auto-apply, so no prompt appears either. The switch takes effect immediately, from the next apply.
 With that switch on, the refill hotkey (F6 by default) does the same at any time.
 Changing the equipment option of the active loadout also requests an equipment change.
@@ -306,7 +307,8 @@ Changing hotkeys:
    At least one binding for opening the panel must remain.
 
 Save slot:
-After switching character saves in the game, select the matching slot: 1, 2 or 3.
+Loading a character automatically selects the matching game slot (1, 2 or 3); this display is no longer a manual selector.
+Unknown characters are never guessed as slot 1. Configuration switch failures pause game changes and retry later.
 Loadouts and meals are saved separately for each slot. Panel settings such as language and hotkeys stay the same.
 
 Settings backup and restore:
@@ -323,3 +325,8 @@ Warning: importing replaces the loadouts and meals in the current slot. Check wh
 Clear all sets and meals:
 Follow both confirmation prompts to clear the current slot's loadouts and meals.
 This cannot be undone. Use it with care.
+
+自动套用时机：任务外据点／集会所调用出发流程时，在原出发函数开始执行前套用道具；不再等进入任务后补做。任务内重开／重置、读盘期间不调用道具 GUI。普通出发和救援在游戏出发入口套用；BIQ Restart 在自身写入出发状态之前套用，且只允许请求发起于任务外据点／集会所。任务内发起的 Restart 即使途中返回据点也不会套用，不在任务入场后补做。
+Auto-apply timing: apply items immediately before the original hub-departure function runs, not after quest arrival. In-quest restart/reset and loading never invoke the item GUI. Normal and SOS departures apply at the native departure entry. BIQ Restart applies before its own departure-state write, only when the request originated at a hub. Field-origin restarts never apply, even if they later pass through a hub; there is no arrival fallback.
+据点／集会所主动选中套装时，同时套用装备和道具。此次道具套用使用 BIQ 专属命令，不受自动套用开关控制；读盘／重置或离开据点后取消未执行的此次请求。
+Selecting a loadout at a hub applies equipment and items together. This explicit BIQ item command works even with auto-apply off; pending hub-selection requests are discarded during loading/reset or after leaving the hub.

@@ -116,6 +116,13 @@ static void CheckMealApply(std::uintptr_t load, std::uintptr_t food)
     CancelPending();
 }
 
+static int directCalls = 0, nativeCalls = 0, seenIndex = -1, seenMode = -1;
+static std::uintptr_t seenOwner = 0;
+static void FakeDirect(std::uintptr_t owner, int index, int mode) {
+    ++directCalls; seenOwner=owner; seenIndex=index; seenMode=mode;
+}
+static void FakeNative(const inq::ItemCommand*, void*, std::uintptr_t*) { ++nativeCalls; }
+
 int main()
 {
     using namespace inq;
@@ -160,7 +167,9 @@ int main()
     set.id = 1; set.equip = "2"; set.item = "#3"; set.food = 4; set.quest = 101;
     cfg.sets.push_back(set);
     g.food = -1; g.questId = 0;
+    cfg.sets[0].item.clear(); // equipment-only request before callable fixtures exist
     CHECK(RequestActiveSetEquipApply(cfg), "active set queues equipment only");
+    cfg.sets[0].item = "#3";
     CHECK(g_pendingEquipApply.load() == 2 && g_pendingSetItem == 0 && g.food == -1 && g.questId == 0,
           "item food quest unchanged");
     cfg.activeSet = -1;
@@ -242,8 +251,8 @@ int main()
           "unknown state cannot publish equipment or delayed items");
     Put(game::pQuest, At(quest)); Put<std::uint32_t>(At(quest) + 0x38, 2);
     RequestRestart(cfg);
-    CHECK(g.equipLoadout == 2 && g_pendingSetItem == 3 && g.food == 4,
-          "intentional restart retains original equipment item and meal path");
+    CHECK(g.equipLoadout == 2 && g_pendingSetItem == 0 && g.food == 4,
+          "in-quest restart retains equipment and meal but never queues an item command");
     const int restartItems = g_pendingSetItem;
     cfg.sets[0].item.clear();
     CHECK(!RequestActiveSetEquipApply(cfg) && g_pendingSetItem == restartItems,
@@ -256,6 +265,41 @@ int main()
     CHECK(chats.size() == beforeWarning + 1, "safety warning once survives restart cancellation and Dormant");
     CancelPending(); cfg.activeSet = -1;
     Put<std::uint32_t>(At(quest) + 0x38, 1);
+
+    // Hub origin is required; loading and chained resets never masquerade as entry.
+    {
+        ItemEntryTracker t;
+        CHECK(!t.Observe(2,true,false,At(slot),0) && !t.Observe(2,true,false,At(slot),600),
+              "enabling in an existing quest does not auto-apply");
+        CHECK(!t.Observe(1,true,false,At(slot),700) && !t.Observe(1,true,false,At(slot),1200),
+              "stable hub arms one arrival without applying in hub");
+        CHECK(!t.Observe(2,false,false,At(slot),1300) && !t.Observe(2,true,false,At(slot),1400),
+              "entry waits for readable idle and stability");
+        CHECK(t.Observe(2,true,false,At(slot),1900), "hub to quest applies once");
+        CHECK(!t.Observe(2,true,false,At(slot),2500), "same quest does not repeat");
+        t.Observe(2,false,false,At(slot),2600); t.Observe(2,true,false,At(slot),2700);
+        CHECK(!t.Observe(2,true,false,At(slot),3300), "same-quest loading does not rearm");
+        t.BeginReset(false,At(slot));
+        t.Observe(2,false,true,At(slot),3400); t.Observe(2,true,false,At(slot),3500);
+        CHECK(!t.Observe(2,true,false,At(slot),4100), "reset remains suppressed after restart flag clears");
+        t.BeginReset(true,At(slot));
+        t.Observe(2,false,true,At(slot),4200); t.Observe(2,true,false,At(slot),4300);
+        CHECK(t.Observe(2,true,false,At(slot),4900), "hub restart applies only after arrival");
+        t.BeginReset(true,At(slot));
+        t.Observe(2,true,false,At(slot)+0x26cc00,5000);
+        CHECK(!t.Observe(2,true,false,At(slot)+0x26cc00,5600), "character change discards old hub origin");
+    }
+    // Accepted reset requests synchronously drop pending item/refill work.
+    cfg.activeSet=1; cfg.sets[0].item="#3";
+    g_pendingSetItem=3; g_refillRequest.store(true); g_refillPlan={At(slot),3,999999};
+    RequestResetOnly();
+    CHECK(g_pendingSetItem==0 && !g_refillRequest.load() && !g_refillPlan.store,
+          "reset-only drops item requests before starting transition");
+    Put<std::uint64_t>(At(base)+0x8F60,0);
+    Put<std::uint32_t>(At(load)+0x1D04,1);
+    Tick(cfg);
+    CHECK(game::Rd<std::uint64_t>(At(base)+0x8F60)==0, "reset loading tick never publishes item UI command");
+    CancelPending(); Put<std::uint32_t>(At(load)+0x1D04,0); cfg.activeSet=-1;
 
     RequestEquipApply(cfg, "10");
     auto c = Context(); c.rax = 0;
@@ -354,6 +398,8 @@ int main()
     ApplyOptions(gateCfg);
     CHECK(g.palicoLoadout == 0, "disabling clears a pending Palico application");
     const auto record = [&](int n) { return At(slot) + 0x13B574 + std::uintptr_t(n - 1) * 0x130; };
+    for (int n = 1; n <= 24; ++n) Put<std::uint32_t>(record(n) + 0x100, 0xFFFFFFFFu);
+    Put<std::uint32_t>(record(3) + 0x100, 1); // occupied, unnamed record
     Put<std::uint32_t>(record(1) + 0x100, 1);
     std::memcpy(reinterpret_cast<void*>(record(1)), "   ", 4);
     Put<std::uint32_t>(record(2) + 0x100, 1);
@@ -363,9 +409,139 @@ int main()
     Put<std::uint32_t>(record(7) + 0x100, 1);
     std::memcpy(reinterpret_cast<void*>(record(7)), "Bravo", 6);
     const auto palicoNames = ListPalicoLoadouts();
-    CHECK(palicoNames.size() == 2 && palicoNames[0].number == 2 && palicoNames[0].name == "Alpha" &&
-          palicoNames[1].number == 7 && palicoNames[1].name == "Bravo",
-          "Palico names use real sparse IDs and omit empty or blank records");
+    CHECK(palicoNames.size() == 4 && palicoNames[0].number == 1 && !palicoNames[0].name.empty() &&
+          palicoNames[1].number == 2 && palicoNames[1].name == "Alpha" &&
+          palicoNames[2].number == 3 && !palicoNames[2].name.empty() &&
+          palicoNames[3].number == 7 && palicoNames[3].name == "Bravo",
+          "Palico names preserve occupied unnamed records and sparse IDs, but omit empty equipment");
+    // No game code is ever rewritten, even when enabling/disabling the option.
+    CHECK(MapGlobal(game::kItemSetRead1), "map isolated original setting reads");
+    const std::uint64_t originals[3] = {0x840014041588B60FULL,0x00140415B8B60F44ULL,0x480014041588B60FULL};
+    const std::uintptr_t sites[3] = {game::kItemSetRead1,game::kItemSetRead2,game::kItemSetRead3};
+    for (int i=0;i<3;++i) Put(sites[i],originals[i]);
+    CHECK(!SetItemBarrier(true), "missing native callable fails closed");
+    CHECK(SetItemBarrier(false), "disable needs no executable writes");
+    for (int i=0;i<3;++i) CHECK(game::Rd<std::uint64_t>(sites[i])==originals[i], "all native setting reads remain unchanged");
+    CHECK(MapGlobal(game::kItemLoadoutCmd), "map isolated native command table");
+    CHECK(game::Readable(game::EXE+0x1D38110, 10), "apply prologue shares the mapped setting-read page");
+    const std::uintptr_t tableFixture[6] = {game::EXE+0x1D37230,game::EXE+0x1D37230,
+        game::EXE+0x1D37CC0,0x1111,0x2222,0x3333};
+    std::memcpy(reinterpret_cast<void*>(game::kItemLoadoutCmd),tableFixture,sizeof(tableFixture));
+    const unsigned char applyHead[10]={0x48,0x89,0x5C,0x24,0x08,0x48,0x89,0x74,0x24,0x10};
+    std::memcpy(reinterpret_cast<void*>(game::EXE+0x1D38110),applyHead,sizeof(applyHead));
+    CHECK(SetItemBarrier(true), "valid ABI enables private table without patching game table");
+    CHECK(g_itemCommandTable[0]==reinterpret_cast<std::uintptr_t>(&CopyItemCommand) &&
+          g_itemCommandTable[2]==reinterpret_cast<std::uintptr_t>(&InvokeItemCommand) &&
+          g_itemCommandTable[3]==0x1111 && g_itemCommandTable[4]==0x2222 && g_itemCommandTable[5]==0x3333,
+          "private table replaces only copy/move/invoke slots");
+    CHECK(std::memcmp(reinterpret_cast<void*>(game::kItemLoadoutCmd),tableFixture,sizeof(tableFixture))==0,
+          "native command vtable itself remains byte-for-byte unchanged");
+    g_itemApply = FakeDirect; g_itemOriginalInvoke = FakeNative;
+    g_itemCommandOverride.store(true); SetEnabled(true);
+    std::uintptr_t ownerMemory[1] = {game::EXE+0x3460220};
+    std::uintptr_t owner = reinterpret_cast<std::uintptr_t>(ownerMemory);
+    ItemCommand command{reinterpret_cast<std::uintptr_t>(g_itemCommandTable),79,0}, copied{};
+    CopyItemCommand(&command,&copied);
+    CHECK(copied.table==command.table && copied.index==79 && copied.mode==0, "copy preserves private callable identity and payload");
+    InvokeItemCommand(&copied,nullptr,&owner);
+    CHECK(directCalls==1 && nativeCalls==0 && seenOwner==owner && seenIndex==79 && seenMode==0, "only private command takes native yes/include-radial apply");
+    command.mode=1; InvokeItemCommand(&command,nullptr,&owner);
+    CHECK(directCalls==2 && seenMode==1, "explicit no-radial mode passed intact");
+    g.restart=1; InvokeItemCommand(&copied,nullptr,&owner);
+    CHECK(directCalls==2 && nativeCalls==0, "already queued private command is dropped during reset");
+    g.restart=0; Put<std::uint32_t>(At(load)+0x1D04,1);
+    InvokeItemCommand(&copied,nullptr,&owner);
+    CHECK(directCalls==2 && nativeCalls==0, "already queued private command is dropped during loading after reset flag clears");
+    Put<std::uint32_t>(At(load)+0x1D04,0);
+    SetItemBarrier(false); InvokeItemCommand(&copied,nullptr,&owner);
+    CHECK(directCalls==2 && nativeCalls==1, "queued command after disable uses original policy");
+    g_itemCommandOverride.store(true); ownerMemory[0]=0;
+    InvokeItemCommand(&copied,nullptr,&owner);
+    CHECK(directCalls==2 && nativeCalls==2, "unexpected owner is never directly applied");
+    ownerMemory[0]=game::EXE+0x3460220; SetEnabled(false);
+    InvokeItemCommand(&copied,nullptr,&owner);
+    CHECK(directCalls==2 && nativeCalls==3, "Dormant cannot invoke direct apply");
+    CancelPending(); SetEnabled(true); SetItemBarrier(false);
+    cfg.itemAutoApply=false; cfg.activeSet=1; cfg.sets[0].item="#3";
+    Put<std::uint32_t>(At(quest)+0x38,1); Put<std::uint32_t>(At(load)+0x1D04,0);
+    CHECK(RequestActiveSetEquipApply(cfg) && g_pendingSetItem==3 && g_explicitHubItem,
+          "hub selection queues equipment and explicit BIQ items with auto-apply off");
+    Put<std::uint64_t>(At(base)+0x8F60,0); Tick(cfg);
+    ItemCommand hubCommand=game::Rd<ItemCommand>(At(base)+0x4F60);
+
+    CHECK(hubCommand.table==reinterpret_cast<std::uintptr_t>(g_itemCommandTable) &&
+          hubCommand.index==2 && (hubCommand.mode & kExplicitHubItem),
+          "hub selection publishes private callable independently of auto switch");
+    const int beforeHub=directCalls, beforeNative=nativeCalls;
+    InvokeItemCommand(&hubCommand,nullptr,&owner);
+    CHECK(directCalls==beforeHub+1 && nativeCalls==beforeNative && seenMode==0,
+          "explicit hub callable applies with auto-apply off and masks its origin bit");
+    Put<std::uint32_t>(At(quest)+0x38,2); InvokeItemCommand(&hubCommand,nullptr,&owner);
+    CHECK(directCalls==beforeHub+1 && nativeCalls==beforeNative,
+          "hub-only callable is discarded if consumed after leaving the hub");
+    Put<std::uint32_t>(At(quest)+0x38,1); RequestActiveSetEquipApply(cfg);
+    Put<std::uint32_t>(At(load)+0x1D04,1); Put<std::uint64_t>(At(base)+0x8F60,0); Tick(cfg);
+    CHECK(g_pendingSetItem==0 && game::Rd<std::uint64_t>(At(base)+0x8F60)==0,
+          "loading cancels a pending hub selection instead of replaying it later");
+    Put<std::uint32_t>(At(load)+0x1D04,0); RequestActiveSetEquipApply(cfg);
+    cfg.activeSet=-1; RequestActiveSetEquipApply(cfg);
+    CHECK(g_pendingSetItem==0 && !g_explicitHubItem, "deselect cancels explicit hub item request");
+    CancelPending(); SetEnabled(true);
+    cfg.activeSet=1; cfg.itemAutoApply=true;
+    Put<std::uint32_t>(At(quest)+0x38,1); Put<std::uint32_t>(At(load)+0x1D04,0);
+    Put<std::uintptr_t>(At(itemUi),game::EXE+0x3460220);
+    ApplyOptions(cfg); Tick(cfg); // publish current selection only
+    const int beforeDepart=directCalls;
+    auto departureCtx=Context(); g.restart=0;
+    OnItemDeparture(&departureCtx);
+    CHECK(directCalls==beforeDepart+1 && seenOwner==At(itemUi) && seenIndex==2 && seenMode==0,
+          "ordinary hub departure applies on GUI thread before original departure");
+    Put<std::uint32_t>(At(quest)+0x38,2); OnItemDeparture(&departureCtx);
+    CHECK(directCalls==beforeDepart+1, "in-quest departure or chained restart cannot auto-apply");
+    g.restart=0; Put<std::uint64_t>(At(base)+0x8F60,0); Tick(cfg);
+    CHECK(game::Rd<std::uint64_t>(At(base)+0x8F60)==0,
+          "quest arrival does not enqueue a late item command");
+    Put<std::uint32_t>(At(quest)+0x38,1); Put<std::uint32_t>(At(load)+0x1D04,1);
+    OnItemDeparture(&departureCtx);
+    CHECK(directCalls==beforeDepart+1, "loading never invokes departure item GUI");
+    Put<std::uint32_t>(At(load)+0x1D04,0); cfg.itemAutoApply=false; ApplyOptions(cfg);
+    OnItemDeparture(&departureCtx);
+    CHECK(directCalls==beforeDepart+1, "auto switch disables departure hook behavior");
+    cfg.itemAutoApply=true; ApplyOptions(cfg); g_departureSlot.store(At(slot)+0x26cc00);
+    OnItemDeparture(&departureCtx);
+    CHECK(directCalls==beforeDepart+1, "departure refuses selection from another save slot");
+    CancelPending(); SetEnabled(true);
+    cfg.itemAutoApply=true; cfg.activeSet=1; ApplyOptions(cfg);
+    std::vector<unsigned char> prepare(0x3000), questMenu(0x2300);
+    Put<std::uintptr_t>(At(ui)+0x3B8,At(prepare));
+    auto departViaBiq=[&]() {
+        auto context=Context(); context.rcx=At(questMenu);
+        g.restart=4; Put<std::uint32_t>(At(prepare)+0x28F0,1);
+        OnQuestLoad(&context);
+    };
+    Put<std::uint32_t>(At(quest)+0x38,1);
+    RequestRestart(cfg);
+    const int beforeBiq=directCalls;
+    departViaBiq();
+    CHECK(directCalls==beforeBiq+1 && seenOwner==At(itemUi) && seenIndex==2 &&
+          game::Rd<std::uint32_t>(At(prepare)+0x28F0)==8 && g.restart==0,
+          "hub-origin BIQ restart applies items before writing departure state");
+    OnRestartItemDeparture();
+    CHECK(directCalls==beforeBiq+1, "BIQ departure origin is consumed only once");
+    Put<std::uint32_t>(At(quest)+0x38,2); RequestRestart(cfg);
+    Put<std::uint32_t>(At(quest)+0x38,1); departViaBiq();
+    CHECK(directCalls==beforeBiq+1,
+          "field-origin restart never applies even when departure later observes a hub");
+    RequestResetOnly();
+    CHECK(!g_restartItemFromHub.load() && g_restartDepartureItem.load()==0,
+          "reset-only cannot retain hub restart departure work");
+    CancelPending(); RequestRestart(cfg); cfg.itemAutoApply=false; ApplyOptions(cfg);
+    departViaBiq();
+    CHECK(directCalls==beforeBiq+1, "disabling auto before BIQ departure suppresses item apply");
+    cfg.itemAutoApply=true; ApplyOptions(cfg); RequestRestart(cfg); CancelPending();
+    CHECK(!g_restartItemFromHub.load() && g_restartDepartureItem.load()==0,
+          "cancellation clears restart departure origin and selection");
+    for (int i=0;i<3;++i) CHECK(game::Rd<std::uint64_t>(sites[i])==originals[i], "private command never patches global instructions");
     SetEnabled(false);
     std::printf("%d failure(s)\n", failures);
     return failures ? 1 : 0;

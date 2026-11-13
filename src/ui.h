@@ -34,7 +34,7 @@ struct Model {
     bool reqResetOnly = false;            // 只重置任务：回据点，不接任务也不出发
     bool reqApplyEquip = false;           // 显式套用/取消/编辑当前装备：主循环排队换装，不重开
     bool reqSave = false;
-    int slot = 1;                         // 设置页里选的存档位（1..3）
+    int slot = 1;                         // Automatically associated game slot (1..3).
     bool reqSlot = false;                 // 玩家切了存档位，要换配置                 // 配置改了，存盘并生效
     bool reqClose = false;                // 关面板
     bool reqImportInq = false;            // 文件选择框里挑好了 config.txt：请求导入

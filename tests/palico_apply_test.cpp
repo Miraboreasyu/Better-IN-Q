@@ -125,5 +125,25 @@ int main() {
       assert(r.ok && !r.changed && f.backups==0); }
     { Fake f; auto b=f.backend(); b.write=nullptr; auto r=palico::ApplyWithBackend({0,0,-1,0},"backups",b); assert(!r.ok && !f.backups); }
     { Fake f; f.put(0x13b680,3); auto r=f.apply({-1,0,-1,15,1}); assert(r.ok && f.get(0x10266c)==70 && !f.get(0x102660) && f.writes==1); }
-    std::cout << "palico_apply_test: 29 cases passed\n";
+    { Fake f; palico::SaveOriginal orig; auto c=f.current;
+      assert(palico::CaptureSaveFields(f.backend(),c,orig));
+      f.current.slotIndex=2;
+      auto result=palico::RestoreWithBackend(orig,"backups",f.backend());
+      assert(!result.ok && !f.writes && !f.backups); }
+    { Fake f; palico::SaveOriginal orig; auto c=f.current;
+      assert(palico::CaptureSaveFields(f.backend(),c,orig));
+      orig.slot+=0x26cc00;
+      auto result=palico::RestoreWithBackend(orig,"backups",f.backend());
+      assert(!result.ok && !f.writes && !f.backups); }
+    { Fake f; f.put(0x10265c,100); palico::SaveOriginal orig;
+      assert(palico::CaptureSaveFields(f.backend(),f.current,orig));
+      f.put(0x10265c,490); f.busy=true;
+      assert(!palico::RestoreWithBackend(orig,"backups",f.backend()).ok && orig.valid);
+      f.busy=false;
+      assert(palico::RestoreWithBackend(orig,"backups",f.backend()).ok && f.get(0x10265c)==100); }
+    { Fake f; f.put(0x1026f8,0x10); palico::SaveOriginal orig;
+      assert(palico::CaptureSaveFields(f.backend(),f.current,orig));
+      f.put(0x1026f8,0x800);
+      assert(palico::RestoreWithBackend(orig,"backups",f.backend()).ok && f.get(0x1026f8)==0x810); }
+    std::cout << "palico_apply_test: 33 cases passed\n";
 }

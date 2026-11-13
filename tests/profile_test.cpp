@@ -69,6 +69,15 @@ static void TestIdentitySelection()
 int main()
 {
     TestIdentitySelection();
+    profile::detail::AutoSlotTracker tracker;
+    CHECK(tracker.Observe(1,0x100000,100)==0, "auto profile waits for loaded character stability");
+    CHECK(tracker.Observe(1,0x100000,599)==0, "auto profile does not settle early");
+    CHECK(tracker.Observe(1,0x100000,600)==1, "auto profile maps game slot zero to profile one");
+    CHECK(tracker.Observe(0,0,700)==0, "unknown sample is never interpreted as slot one");
+    CHECK(tracker.Observe(3,0x100000,800)==0, "slot change restarts stability interval");
+    CHECK(tracker.Observe(3,0x100000,1300)==3, "sparse character slots map directly");
+    CHECK(tracker.Observe(3,0x200000,1400)==0, "save base relocation restarts stability");
+    CHECK(tracker.Observe(4,0x200000,2000)==0, "invalid slot is rejected");
     // 干净的临时目录（测试自己的，不碰真实插件目录）
     const std::wstring dir = L"out\\profile_test_dir\\";
     system("rmdir /s /q out\\profile_test_dir 2>nul");
