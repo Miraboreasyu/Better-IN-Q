@@ -46,7 +46,7 @@ volatile LONG g_teardown = 0;   // 窗口已销毁/进程在退出，这时候�
 // 窗口已经没了、我们正在收尾：异常处理器从此一律不碰（见 OnCrash）。
 std::atomic<bool> g_exiting{false};
 std::atomic<long> g_inCrash{0};
-const char* const kVersion = "0.7.4.1";
+const char* const kVersion = "0.7.4.2";
 
 // 主循环线程和游戏渲染线程（画面板）共用，都要先拿这把锁
 std::mutex g_mx;
@@ -84,6 +84,10 @@ void OnOverlayOpened()
 void OnOverlayDraw(float w, float h)
 {
     std::lock_guard<std::mutex> lk(g_mx);
+    const auto ime = overlay::GetImeText();
+    g_model.imeComposition=ime.composition;
+    g_model.imeCandidates=ime.candidates;
+    g_model.imeSelected=ime.selected;
     ui::Draw(g_model, w, h);
 }
 

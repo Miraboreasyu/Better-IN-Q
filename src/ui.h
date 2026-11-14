@@ -22,6 +22,9 @@ struct LoadoutName {
 // 面板和外界只通过它打交道。Draw 在渲染线程里调用，调用方持锁。
 // 面板只「提请求」，真正干活（动游戏内存、写盘）由主循环看到请求后去做。
 struct Model {
+    std::string imeComposition;
+    std::vector<std::string> imeCandidates;
+    int imeSelected = -1;
     Config* cfg = nullptr;
     bool ready = false;                   // 重开功能装上了没有
     std::string version;
@@ -91,6 +94,8 @@ struct DebugHintIconGeometry {
     float maxCenterError = 0;
 };
 DebugHintIconGeometry DebugHintIcons();
+struct DebugImeGeometry { int candidates=0, rows=0; bool preedit=false; float left=0,top=0,right=0,bottom=0; };
+DebugImeGeometry DebugImeBounds();
 struct DebugFoodPreviewGeometry {
     bool visible = false, fromPopup = false;
     int foodId = 0;

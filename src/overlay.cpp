@@ -7,6 +7,7 @@
 #include "i18n.h"
 #include "log.h"
 #include "panel_gamepad_gate.h"
+#include "ime_candidates.h"
 
 #include <windows.h>
 #include <d3d11.h>
@@ -284,6 +285,7 @@ void ImeOffWindowThread(HWND h = nullptr)
     if (!h || h != g_imeOwner || g_imeSyncing ||
         ::GetWindowThreadProcessId(h, nullptr) != ::GetCurrentThreadId()) return;
     g_imeSyncing = true; // IMM 会同步重入 WndProc，不能二次恢复/销毁。
+    ime_candidates::Stop();
     const HIMC owned = g_imc;
     const HIMC previous = g_imcPrev;
     g_imc = nullptr;
@@ -324,6 +326,7 @@ void ImeSyncOnWindowThread(HWND h)
     }
     const bool want = g_imeWant.load();
     if (want != g_imeAppliedWant) {
+        if (want) ime_candidates::Start(); else ime_candidates::Stop();
         ::ImmSetOpenStatus(g_imc, want ? TRUE : FALSE);
         g_imeAppliedWant = want;
     }
@@ -674,6 +677,11 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l)
         return ForwardToGame(h, msg, w, l, previous);
     const InputTicket inputTicket = CurrentInputTicket();
     if ((inputTicket.open & 1) && g_inited.load() && !g_dead.load()) {
+        const auto imeBefore = ime_candidates::Copy();
+        const bool composingKey = !imeBefore.composition.empty() &&
+            (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && (w == VK_RETURN || w == VK_ESCAPE);
+        ime_candidates::Message(h,msg,w,l);
+        if (composingKey) return 0; // select/cancel IME text, not the underlying dialog
         // 输入法：自己取结果串塞进 ImGui，不交给后端（后端会再调 DefWindowProcW，
         // 结果串可能被算两遍，也不保证一定生成 WM_CHAR）
         switch (msg) {
@@ -1506,6 +1514,20 @@ bool WindowGone()
 {
     const HWND h = g_hwnd;
     return h != nullptr && ::IsWindow(h) == FALSE;
+}
+ImeText GetImeText()
+{
+    ImeText result;
+    if (!PanelOpen() || !g_imeWant.load() || !g_imeEnabled.load()) return result;
+    const auto state = ime_candidates::Copy();
+    auto utf8=[](const std::wstring& text) {
+        if(text.empty())return std::string();
+        const int n=WideCharToMultiByte(CP_UTF8,0,text.data(),int(text.size()),nullptr,0,nullptr,nullptr);
+        std::string out(n,0);if(n)WideCharToMultiByte(CP_UTF8,0,text.data(),int(text.size()),out.data(),n,nullptr,nullptr);return out;
+    };
+    result.composition=utf8(state.composition);
+    for(const auto& word:state.candidates)result.candidates.push_back(utf8(word));
+    result.selected=state.selected;return result;
 }
 void SetImeEnabled(bool on) { g_imeEnabled = on; if (!on) ImeRequest(false, false); }
 void SetWndHook(bool on) { g_wndHook = on; }

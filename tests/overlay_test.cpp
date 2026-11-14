@@ -307,6 +307,14 @@ int wmain(int argc, wchar_t** argv)
         if (i == 9) g_shot = out + L"\\overlay_rename.png";
         frame(0.25f, 0.35f, 0.25f);
     }
+    g_model.imeComposition = "hei'long";
+    g_model.imeCandidates = {"黑龙", "黑狼鸟", "黑色的龙"};
+    g_model.imeSelected = 0;
+    for (int i=0;i<3;++i) {
+        if(i==2)g_shot=out+L"\\overlay_ime_candidates.png";
+        frame(0.25f,0.35f,0.25f);
+    }
+    g_model.imeComposition.clear();g_model.imeCandidates.clear();
     ui::DebugCloseRename();
     for (int i = 0; i < 4; ++i) frame(0.25f, 0.35f, 0.25f);
     // 看样子用：新建套装时就能起名

@@ -28,8 +28,51 @@ static void Activate(HWND h)
     overlay::SetOpen(true);
     overlay::ImeRequest(true, false);
 }
+struct FakeCandidates final : ITfCandidateListUIElement {
+ UINT pageSize=9; bool failString=false,failPage=false;
+ HRESULT STDMETHODCALLTYPE QueryInterface(REFIID,void**) override{return E_NOINTERFACE;}
+ ULONG STDMETHODCALLTYPE AddRef() override{return 2;} ULONG STDMETHODCALLTYPE Release() override{return 1;}
+ HRESULT STDMETHODCALLTYPE GetDescription(BSTR*) override{return E_NOTIMPL;}
+ HRESULT STDMETHODCALLTYPE GetGUID(GUID*) override{return E_NOTIMPL;}
+ HRESULT STDMETHODCALLTYPE Show(BOOL) override{return S_OK;}
+ HRESULT STDMETHODCALLTYPE IsShown(BOOL* v) override{*v=TRUE;return S_OK;}
+ HRESULT STDMETHODCALLTYPE GetUpdatedFlags(DWORD* v) override{*v=0;return S_OK;}
+ HRESULT STDMETHODCALLTYPE GetDocumentMgr(ITfDocumentMgr**) override{return E_NOTIMPL;}
+ HRESULT STDMETHODCALLTYPE GetCount(UINT* v) override{*v=pageSize*2;return S_OK;}
+ HRESULT STDMETHODCALLTYPE GetSelection(UINT* v) override{*v=pageSize+1;return S_OK;}
+ HRESULT STDMETHODCALLTYPE GetString(UINT i,BSTR* v) override{if(failString)return E_FAIL;*v=SysAllocString((L"word"+std::to_wstring(i)).c_str());return S_OK;}
+ HRESULT STDMETHODCALLTYPE GetPageIndex(UINT* v,UINT cap,UINT* got) override{if(failPage)return E_FAIL;*got=2;if(cap>=2){v[0]=0;v[1]=pageSize;}return S_OK;}
+ HRESULT STDMETHODCALLTYPE SetPageIndex(UINT*,UINT) override{return E_NOTIMPL;}
+ HRESULT STDMETHODCALLTYPE GetCurrentPage(UINT* v) override{*v=1;return S_OK;}
+};
 int main()
 {
+    FakeCandidates fake;
+    ime_candidates::active=true;
+    CHECK(ime_candidates::ReadList(&fake,42));
+    auto candidates=ime_candidates::Copy();
+    CHECK(candidates.candidates.size()==9 && candidates.candidates[0]==L"word9" && candidates.selected==1);
+    BOOL show=TRUE;
+    ime_candidates::sink.BeginUIElement(999,&show);
+    CHECK(show==TRUE); // unavailable/unrelated UI must not be suppressed
+    ime_candidates::sink.EndUIElement(41);
+    CHECK(ime_candidates::Copy().candidates.size()==9);
+    ime_candidates::sink.EndUIElement(42);
+    CHECK(ime_candidates::Copy().candidates.empty());
+    for(UINT size:{5u,7u,12u,20u}) {
+        fake.pageSize=size;
+        CHECK(ime_candidates::ReadList(&fake,42));
+        auto page=ime_candidates::Copy();
+        CHECK(page.candidates.size()==size && page.candidates.front()==L"word"+std::to_wstring(size) && page.selected==1);
+    }
+    fake.failString=true;
+    CHECK(!ime_candidates::ReadList(&fake,42) && ime_candidates::Copy().candidates.empty());
+    fake.failString=false;fake.failPage=true;
+    CHECK(!ime_candidates::ReadList(&fake,42));
+    fake.failPage=false;fake.pageSize=257;
+    CHECK(!ime_candidates::ReadList(&fake,42)); // oversized pages fall back instead of truncating
+    ime_candidates::Stop();
+    CHECK(!ime_candidates::active && ime_candidates::Copy().composition.empty());
     WNDCLASSEXW wc{sizeof(wc)};
     wc.lpfnWndProc = GameProc;
     wc.hInstance = GetModuleHandleW(nullptr);
@@ -57,6 +100,15 @@ int main()
     overlay::SetOpen(false);
     CHECK(overlay::ImeContext(h) == a);
     CHECK(!overlay::g_imc && !overlay::g_imeOwner);
+
+    Activate(h);
+    overlay::ImeRequest(true,true);
+    { std::lock_guard<std::mutex> lock(ime_candidates::mutex); ime_candidates::view.composition=L"hei"; }
+    SendMessageW(h,WM_KEYDOWN,VK_RETURN,0);
+    SendMessageW(h,WM_KEYDOWN,VK_ESCAPE,0);
+    CHECK(overlay::GetImeText().composition=="hei");
+    overlay::SetOpen(false);
+    CHECK(overlay::GetImeText().composition.empty() && ime_candidates::Copy().composition.empty());
 
     // Preserve the game's latest replacement, not the first saved context.
     Activate(h);

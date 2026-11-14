@@ -2550,6 +2550,18 @@ int main()
         CHECK(ui::DebugPage() == 2 && cfg.activeSet == firstId, "切回装载态后 A 能再次套用（%d）", cfg.activeSet);
     }
 
+    // Composition previews are transient and must not enter the committed query.
+    ui::DebugGo(1,0); Frame(); ui::DebugFocusSearch(); Frame(); Frame();
+    const std::string committed=ui::DebugSearch();
+    m.imeComposition="hei"; m.imeCandidates={"黑龙","黑狼鸟"}; m.imeSelected=0;
+    Frame();
+    CHECK(ui::DebugSearch()==committed,"IME preedit does not mutate committed search text");
+    auto ime=ui::DebugImeBounds();
+    CHECK(ime.preedit && ime.candidates==2 && ime.rows==1,"IME preedit renders inside field and short candidates share horizontal row");
+    m.imeCandidates.assign(12,"测试");Frame();ime=ui::DebugImeBounds();
+    CHECK(ime.candidates==12 && ime.left>=0 && ime.right<=ImGui::GetIO().DisplaySize.x && ime.bottom<=ImGui::GetIO().DisplaySize.y,
+          "IME displays more than nine candidates within screen bounds");
+    m.imeComposition.clear(); m.imeCandidates.clear(); Frame();
     TestPalicoControls();
     TestSettingsTransfer();
 

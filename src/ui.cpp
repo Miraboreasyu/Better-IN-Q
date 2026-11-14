@@ -1169,6 +1169,72 @@ bool GroupRow(const char* id, const char* label, int count, bool open)
     return pressed;
 }
 
+DebugImeGeometry g_imeGeometry;
+// Pure drawing: preedit replaces the visual selection only, never the user's buffer.
+void DrawImeCandidates(const Model& m, ImVec2 fieldMin, ImVec2 fieldMax)
+{
+    g_imeGeometry={};
+    const auto state=ImGui::GetInputTextState(ImGui::GetItemID());
+    if(state && !m.imeComposition.empty()) {
+        g_imeGeometry.preedit=true;
+        const char* committed=state->GetText();
+        const int cursor=std::clamp(state->GetCursorPos(),0,state->TextLen);
+        const int begin=state->HasSelection()?(std::min)(state->GetSelectionStart(),state->GetSelectionEnd()):cursor;
+        const int end=state->HasSelection()?(std::max)(state->GetSelectionStart(),state->GetSelectionEnd()):cursor;
+        const std::string prefix(committed,committed+begin);
+        const std::string visible=prefix+m.imeComposition+std::string(committed+end);
+        auto dl=ImGui::GetWindowDrawList();
+        const auto padding=ImGui::GetStyle().FramePadding;
+        const float available=(std::max)(1.f,fieldMax.x-fieldMin.x-2*padding.x);
+        const float preWidth=TextSize(fReg,szBody,prefix.c_str()).x;
+        const float compWidth=TextSize(fReg,szBody,m.imeComposition.c_str()).x;
+        const float scroll=(std::max)(state->Scroll.x,preWidth+compWidth-available);
+        const ImVec2 origin(fieldMin.x+padding.x-scroll,fieldMin.y+(fieldMax.y-fieldMin.y-szBody)*.5f);
+        dl->PushClipRect(fieldMin+ImVec2(padding.x,2),fieldMax-ImVec2(padding.x,2),true);
+        dl->AddRectFilled(fieldMin+ImVec2(padding.x,2),fieldMax-ImVec2(padding.x,2),ImGui::GetColorU32(ImGuiCol_FrameBg));
+        dl->AddText(fReg,szBody,origin,kText,visible.c_str());
+        dl->AddLine(ImVec2(origin.x+preWidth,origin.y+szBody+1),ImVec2(origin.x+preWidth+compWidth,origin.y+szBody+1),kGold);
+        dl->PopClipRect();
+    }
+    if(m.imeCandidates.empty())return;
+    const ImVec2 screen=ImGui::GetIO().DisplaySize;
+    const float pad=8*S,gap=18*S,line=szBody+6*S;
+    const float maxWidth=(std::max)(40.f,screen.x-16*S);
+    const float inner=(std::max)(1.f,maxWidth-2*pad);
+    struct Cell {std::string text;float x,y,width,height;};
+    std::vector<Cell> cells;float x=0,y=0,used=0,rowH=line;
+    for(size_t i=0;i<m.imeCandidates.size();++i) {
+        std::string text=std::to_string(i+1)+" "+m.imeCandidates[i];
+        float width=(std::min)(inner,TextSize(fReg,szBody,text.c_str()).x);
+        float h=(std::max)(line,fReg->CalcTextSizeA(szBody,FLT_MAX,inner,text.c_str()).y+6*S);
+        if(x>0 && x+width>inner){x=0;y+=rowH;rowH=line;}
+        cells.push_back({text,x,y,width,h});rowH=(std::max)(rowH,h);
+        used=(std::max)(used,x+width);x+=width+gap;
+    }
+    const float width=(std::min)(maxWidth,(std::max)(used+2*pad,180*S));
+    const float height=(std::min)(y+rowH+2*pad,(std::max)(30.f,screen.y-16*S));
+    float left=std::clamp(fieldMin.x,8*S,(std::max)(8*S,screen.x-width-8*S));
+    float top=fieldMax.y+5*S;if(top+height>screen.y-8*S)top=fieldMin.y-height-5*S;
+    top=std::clamp(top,8*S,(std::max)(8*S,screen.y-height-8*S));
+    g_imeGeometry.candidates=int(cells.size()); g_imeGeometry.rows=1;
+    for(size_t i=1;i<cells.size();++i)if(cells[i].y!=cells[i-1].y)++g_imeGeometry.rows;
+    g_imeGeometry.left=left;g_imeGeometry.top=top;g_imeGeometry.right=left+width;g_imeGeometry.bottom=top+height;
+    auto dl=ImGui::GetForegroundDrawList();
+    dl->AddRectFilled(ImVec2(left,top),ImVec2(left+width,top+height),IM_COL32(24,22,18,250),8*S);
+    dl->AddRect(ImVec2(left,top),ImVec2(left+width,top+height),IM_COL32(226,194,122,120),8*S);
+    dl->PushClipRect(ImVec2(left+pad,top+pad),ImVec2(left+width-pad,top+height-pad),true);
+    float offset=0;
+    if(m.imeSelected>=0 && m.imeSelected<(int)cells.size())
+        offset=(std::max)(0.f,cells[m.imeSelected].y+cells[m.imeSelected].height-(height-2*pad));
+    for(size_t i=0;i<cells.size();++i) {
+        const auto& c=cells[i];
+        const float textH=fReg->CalcTextSizeA(szBody,FLT_MAX,inner,c.text.c_str()).y;
+        const float textY=top+pad+c.y-offset+(c.height-textH)*0.5f;
+        dl->AddText(fReg,szBody,ImVec2(left+pad+c.x,textY),int(i)==m.imeSelected?kGold:kText,c.text.c_str(),nullptr,inner);
+    }
+    dl->PopClipRect();
+}
+
 void PageQuests(Model& m)
 {
     Config& c = *m.cfg;
@@ -1199,6 +1265,8 @@ void PageQuests(Model& m)
                                       "name, pinyin, kana, romaji or ID",
                                       "名前・ピンイン・かな・ローマ字・ID"),
                              g_search, sizeof(g_search));
+    const bool searchActive = ImGui::IsItemActive();
+    if(searchActive) DrawImeCandidates(m,ImGui::GetItemRectMin(),ImGui::GetItemRectMax());
     const ImGuiID searchId = ImGui::GetItemID();
     ImGuiWindow* searchWindow = ImGui::GetCurrentWindow();
     const ImRect searchRect = GImGui->LastItemData.NavRect;
@@ -1226,7 +1294,7 @@ void PageQuests(Model& m)
         if (open >= 0) g_groupOpen[open] = true;
     }
 
-    const std::string needle = g_search;
+    const std::string needle = std::string(g_search) + (searchActive ? m.imeComposition : std::string());
     const bool searching = !needle.empty();
     // 全局任务可以是 0 =「当前任务」（重开刚打完 / 正在打的那个）；套装里的 0 =「不指定，跟全局走」。
     // 两边都得能选回 0，不然给套装挑过一次任务之后就再也退不回「不指定」了。搜索时它和搜的字无关，不列
@@ -2532,6 +2600,8 @@ void RenamePopup(Model& m)
     const bool enter = ImGui::InputTextWithHint("##name", hint.c_str(), g_renameBuf, sizeof(g_renameBuf),
                                                 ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackEdit,
                                                 RenameInputCallback);
+    const bool composing = ImGui::IsItemActive() && !m.imeComposition.empty();
+    if(ImGui::IsItemActive()) DrawImeCandidates(m,ImGui::GetItemRectMin(),ImGui::GetItemRectMax());
     ImGui::PopStyleColor(2);
     // 输入框外面右下角：还能输几个字
     const int used = CountChars(g_renameBuf);
@@ -2543,7 +2613,7 @@ void RenamePopup(Model& m)
     if (!g_renameErr.empty()) Text(fReg, szSmall, IM_COL32(214, 122, 92, 255), g_renameErr.c_str());
     ImGui::Dummy(ImVec2(0, 8 * S));
 
-    bool ok = enter || PillButton("##rnok", i18n::Tr("确定", "OK", "決定"), 150 * S, 44 * S, kPrimary);
+    bool ok = (enter && !composing) || PillButton("##rnok", i18n::Tr("确定", "OK", "決定"), 150 * S, 44 * S, kPrimary);
     ImGui::SameLine(0, 10 * S);
     if (PillButton("##rncancel", i18n::Tr("取消", "Cancel", "キャンセル"), 150 * S, 44 * S, kSecondary) ||
         ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
@@ -3478,6 +3548,7 @@ int DebugListFocusId()
     return g_listFocusId;
 }
 
+DebugImeGeometry DebugImeBounds() { return g_imeGeometry; }
 int DebugPage()
 {
     static const Page map[] = {kHome, kQuests, kSets, kSetEdit, kFood, kFoodEdit, kSettings};

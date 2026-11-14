@@ -9,6 +9,7 @@
 //  面板关着的时候 Present 里什么都不做，零开销。
 // ============================================================================
 #include <string>
+#include <vector>
 
 namespace overlay {
 
@@ -18,6 +19,8 @@ struct Callbacks {
     void (*draw)(float w, float h) = nullptr;      // 每帧（渲染线程，面板开着时）
 };
 
+struct ImeText { std::string composition; std::vector<std::string> candidates; int selected=-1; };
+ImeText GetImeText();
 bool Install(const Callbacks& cb, std::string& err);
 void SetOpen(bool open);
 void SetImeEnabled(bool on);   // 排查用：关掉输入法接管
