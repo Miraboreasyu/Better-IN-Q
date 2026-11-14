@@ -77,6 +77,30 @@ static void Press(ImGuiKey k)
 
 // Real filesystem enumeration and actual button/navigation events. Transfer IO is
 // deliberately owned by main: the UI may only emit the two explicit requests.
+static void TestQuestSearchShortcut()
+{
+    const auto old = m;
+    m.reqClose = false;
+    m.imeComposition.clear();
+    for (ImGuiKey key : {ImGuiKey_Y, ImGuiKey_GamepadFaceUp}) {
+        ui::OnOpen(m); ui::DebugGo(1, 0); Frame(); Frame();
+        const int quest = m.cfg->questId;
+        CHECK(ui::DebugHintText().find("Y") != std::string::npos, "quest footer advertises Y search");
+        if (key == ImGuiKey_Y) ImGui::GetIO().AddInputCharactersUTF8("y");
+        Press(key);
+        CHECK(ui::DebugSearch().empty(), "shortcut character is not inserted in search");
+        CHECK(ImGui::GetIO().WantTextInput, "Y activates quest search (%d)", (int)key);
+        ImGui::GetIO().AddInputCharactersUTF8("ftb"); Frame(); Frame();
+        CHECK(ui::DebugSearch() == "ftb", "Y search accepts text without selecting a quest");
+        CHECK(m.cfg->questId == quest && ui::DebugPage() == 1, "Y does not apply a quest");
+        Press(ImGuiKey_Y);
+        CHECK(ImGui::GetIO().WantTextInput, "Y while editing leaves input active");
+        Press(ImGuiKey_Escape);
+    }
+    m = old;
+    ui::OnOpen(m);
+}
+
 static void TestSettingsTransfer()
 {
     wchar_t temp[MAX_PATH] = {}, unique[MAX_PATH] = {};
@@ -2563,6 +2587,7 @@ int main()
           "IME displays more than nine candidates within screen bounds");
     m.imeComposition.clear(); m.imeCandidates.clear(); Frame();
     TestPalicoControls();
+    TestQuestSearchShortcut();
     TestSettingsTransfer();
 
     ImGui_ImplDX11_Shutdown();

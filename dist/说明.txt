@@ -40,9 +40,10 @@ L3 / R3 表示按下左 / 右摇杆。手柄按键名称采用 Xbox 标识。
 如果重开流程在同一步停留 12 秒仍未推进（读盘期间不计），插件会取消本次待办并提示已安全复位、可以重试。处理游戏内的拦截提示后可重新按重开，不会自动反复重试。
 
 选择「换任务」，找到任务后确认，即可设为下次重开的任务。
-搜索支持任务 ID、中文 / 英文 / 日文任务名、中文拼音及首字母、日文假名及罗马音。
-例如：heilong、hl、kokuryuu。
-任务列表到顶后再按上，可选中搜索框；确认后输入关键词。
+搜索支持任务 ID、中英日任务名、中文拼音及首字母、英文单词首字母缩写、日文假名及罗马音，也支持假名音节的罗马字首字母。
+例如：heilong、hl、ftb（Fade to Black）、dnstnkkru（でんせつのこくりゅう）。
+在选任务页按手柄 Y / 键盘 Y 可直接进入搜索；输入时 Y 正常输入，不会打断组字。
+任务列表到顶后再按上，仍可选中搜索框；确认后输入关键词。
 
 套装指定了任务时，重开优先使用套装中的任务。
 未套用指定任务的套装时，使用任务页当前显示的任务。
@@ -203,7 +204,8 @@ Reset quest only: reset and return to base without accepting another quest or de
 If a restart stays at the same step for 12 seconds without progress (loading time excluded), the plugin cancels its pending work and asks you to retry. Dismiss any blocking in-game prompt, then restart again; it does not retry automatically.
 
 Choose Quests, find a quest, and confirm it to use it for the next restart.
-Search accepts quest IDs, Chinese / English / Japanese names, Chinese pinyin and initials, and Japanese kana and romaji.
+Search accepts quest IDs, Chinese / English / Japanese names, pinyin and initials, English word initials (ftb = Fade to Black), and kana/romaji plus kana-mora initials (dnstnkkru = でんせつのこくりゅう).
+Press controller Y / keyboard Y on the quest page to start searching. While typing, Y remains a normal character.
 Examples: heilong, hl, kokuryuu.
 At the top of the quest list, press Up again to focus the search box, then confirm to type.
 

@@ -178,7 +178,54 @@ std::string FoldRomaji(const std::string& s)
     return out;
 }
 
-struct JaIndex { std::string kana; std::string romaji; };
+// English initials include every word (including articles), with apostrophes
+// kept inside words and punctuation/hyphens acting as boundaries.
+std::string WordInitials(const char* text)
+{
+    std::string out;
+    bool start = true;
+    for (const unsigned char* p = (const unsigned char*)text; *p; ++p) {
+        if (std::isalnum(*p)) {
+            if (start) out += (char)std::tolower(*p);
+            start = false;
+        } else if (*p != 39) start = true;
+    }
+    return out;
+}
+
+// Initial of each kana mora, using Hepburn initials. Small joining kana and
+// sokuon do not invent extra initials; long vowels remain normal kana.
+std::string KanaInitials(const char* text)
+{
+    std::string out;
+    const std::string kana = NormKana(text);
+    const char* rows[] = {"あいうえお", "かきくけこ", "がぎぐげご", "さすせそ",
+        "ざずぜぞ", "たてと", "だぢづでど", "なにぬねの", "はひへほ",
+        "ばびぶべぼ", "ぱぴぷぺぽ", "まみむめも", "やゆよ", "らりるれろ", "わゐゑを"};
+    const char initials[] = "akgsztdnhbpmyrw";
+    for (std::size_t i = 0; i < kana.size();) {
+        const unsigned cp = NextCp(kana, i);
+        const char* vowels = "aiueo";
+        if (cp >= 0x3042 && cp <= 0x304A && (cp % 2 == 0)) {
+            out += vowels[(cp - 0x3042) / 2]; continue;
+        }
+        if (cp == 0x3094) { out += 'v'; continue; }
+        if (cp == 0x3093) { out += 'n'; continue; }
+        if (cp == 0x3057) { out += 's'; continue; }
+        if (cp == 0x3061 || cp == 0x3064) { out += cp == 0x3061 ? 'c' : 't'; continue; }
+        if (cp == 0x3058) { out += 'j'; continue; }
+        if (cp == 0x3075) { out += 'f'; continue; }
+        for (std::size_t row = 0; row < sizeof(rows)/sizeof(rows[0]); ++row) {
+            const std::string chars = rows[row];
+            for (std::size_t j = 0; j < chars.size();) {
+                if (NextCp(chars,j) == cp) { out += initials[row]; break; }
+            }
+        }
+    }
+    return out;
+}
+
+struct JaIndex { std::string kana; std::string romaji; std::string initials; std::string english; };
 
 // 读音的归一化结果按任务下标缓存（只算一次）
 const JaIndex& JaOf(const QuestInfo& q)
@@ -186,7 +233,7 @@ const JaIndex& JaOf(const QuestInfo& q)
     static std::vector<JaIndex> cache;
     if (cache.empty()) {
         cache.reserve(sizeof(kQuests) / sizeof(kQuests[0]));
-        for (const auto& k : kQuests) cache.push_back({NormKana(k.jaKana), FoldRomaji(k.jaRomaji)});
+        for (const auto& k : kQuests) cache.push_back({NormKana(k.jaKana), FoldRomaji(k.jaRomaji), KanaInitials(k.jaKana), WordInitials(k.en)});
     }
     return cache[(std::size_t)(&q - kQuests)];
 }
@@ -238,6 +285,10 @@ bool QuestMatches(const QuestInfo& q, const std::string& needle)
     if (std::strstr(q.zh, n.c_str()) != nullptr || std::strstr(q.ja, n.c_str()) != nullptr) return true;
     // 日文读音：假名（でんせつ）和罗马音（densetsu / kokuryuu）
     const JaIndex& ja = JaOf(q);
+    // At least two ASCII letters: avoid treating punctuation/non-Latin text as
+    // an empty abbreviation. Match contiguous initials, not arbitrary letters.
+    if (n.size() >= 2 && std::all_of(n.begin(), n.end(), [](unsigned char c) { return c >= 'a' && c <= 'z'; }) &&
+        (ja.english.find(n) != std::string::npos || ja.initials.find(n) != std::string::npos)) return true;
     const std::string kana = NormKana(n);
     if (!kana.empty() && ja.kana.find(kana) != std::string::npos) return true;
     const std::string rj = FoldRomaji(n);

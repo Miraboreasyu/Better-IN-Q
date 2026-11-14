@@ -1250,15 +1250,30 @@ void PageQuests(Model& m)
 
     ImGui::SetNextItemWidth(-1);
     ImGui::PushFont(fReg, szBody);
-    if (g_debugFocusSearch) {
+    const bool jumpSearch = g_renameKind == kRenameNone &&
+        !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) &&
+        GImGui->ActiveId == 0 && m.imeComposition.empty() &&
+        !ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyAlt && !ImGui::GetIO().KeySuper &&
+        (ImGui::IsKeyPressed(ImGuiKey_Y, false) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceUp, false));
+    if (g_debugFocusSearch || jumpSearch) {
         // Resolve the ID in its real submission scope. SetKeyboardFocusHere alone
         // can resolve to another item in this NavFlattened child when the list's
         // manual default-focus request is also pending.
         const ImGuiID id = ImGui::GetID("##search");
+        ImGui::NavMoveRequestCancel();
+        GImGui->NavInitRequest = GImGui->NavInitRequestFromMove = false;
+        GImGui->NavInitResult.ID = 0;
+        ImGui::FocusWindow(ImGui::GetCurrentWindow());
         ImGui::SetFocusID(id, ImGui::GetCurrentWindow());
         GImGui->NavActivateId = id;
         GImGui->NavActivateFlags = ImGuiActivateFlags_PreferInput;
         g_debugFocusSearch = false;
+        // WM_CHAR for the shortcut must not become the first search character.
+        if (jumpSearch) {
+            auto& chars = ImGui::GetIO().InputQueueCharacters;
+            for (int i = chars.Size - 1; i >= 0; --i)
+                if (chars[i] == 'y' || chars[i] == 'Y') chars.erase(chars.Data + i);
+        }
     }
     ImGui::InputTextWithHint("##search",
                              i18n::Tr("任务名、拼音、假名、罗马音或 ID",
@@ -2916,6 +2931,8 @@ std::string OperationHints(const Model& m)
                 : mouse ? i18n::Tr("左键选择 / 操作", "Left-click select / activate", "左クリック 選択 / 決定")
                         : i18n::Tr("Enter / 空格 确认", "Enter / Space activate", "Enter / Space 決定"));
     }
+    if (g_page == kQuests && !mouse && !ImGui::IsAnyItemActive())
+        add(i18n::Tr("Y 搜索", "Y search", "Y 検索"));
     add(pad ? (g_sideFocusedLast ? i18n::Tr("↑ / ↓ 切页 · → 进入页面", "Up/Down switch page · Right enter", "↑ / ↓ ページ切替 · → ページへ")
                                                   : i18n::Tr("方向键导航", "D-pad navigate", "方向キー 移動"))
             : mouse ? i18n::Tr("点击侧栏切页 · 滚轮滚动", "Click sidebar or wheel to switch page", "サイドバーでページ切替 · ホイール スクロール")
@@ -3017,6 +3034,8 @@ std::vector<HintGroup> CompactHints(const Model& m)
     } else if (g_hintAction) {
         add(pad ? "A" : mouse ? "L-click" : "Enter", "确认", "Activate", "決定");
     }
+    if (g_page == kQuests && !mouse && !ImGui::IsAnyItemActive())
+        add("Y", "搜索", "Search", "検索");
     navigate();
     // Esc clears a focused keyboard hotkey chip; it does not navigate back.
     if (!(g_hintHotkey && !pad && !mouse)) {

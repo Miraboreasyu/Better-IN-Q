@@ -156,6 +156,11 @@ int main()
     for (int i = 0; i < n; ++i) if (!gamedata::ValidQuestId(qs[i].id)) ++outOfRange;
     CHECK(outOfRange == 0, "表里 %d 个任务全在合法范围内（越界 %d 个）", n, outOfRange);
 
+    CHECK(Has(66845, "ftb"), "English initials Fade to Black");
+    CHECK(Has(1606, "ROTCO"), "English initials include articles, case insensitive");
+    CHECK(Has(66845, "dnstnkkru"), "Japanese kana initials densetsu no kokuryuu");
+    CHECK(Has(1602, "mcbknut"), "Kana initials include vowel morae");
+    CHECK(!Has(66845, "qqqq"), "unrelated initials rejected");
     TestFoodSkillShortNames();
 
     std::printf(g_fail ? "\n%d 项失败\n" : "\n全部通过（0 项失败）\n", g_fail);
