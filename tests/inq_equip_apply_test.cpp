@@ -123,9 +123,17 @@ static void FakeDirect(std::uintptr_t owner, int index, int mode) {
 }
 static void FakeNative(const inq::ItemCommand*, void*, std::uintptr_t*) { ++nativeCalls; }
 
+static int equipApplyCalls = 0, resetApplyCalls = 0;
+static std::uintptr_t lastEquipObj = 0, lastResetObj = 0;
+static float lastResetDelta = 0.0f;
+static void FakeEquipApply(std::uintptr_t obj) { ++equipApplyCalls; lastEquipObj = obj; }
+static void FakeResetApply(std::uintptr_t obj, float dt) { ++resetApplyCalls; lastResetObj = obj; lastResetDelta = dt; }
+
 int main()
 {
     using namespace inq;
+    g_equipApplyFn = FakeEquipApply;
+    g_resetApplyFn = FakeResetApply;
     Config cfg;
     if (!MapGlobal(game::pSave) || !MapGlobal(game::pUiBase) || !MapGlobal(game::pFood)) {
         std::printf("FAIL: could not reserve fixed game global addresses\\n");
@@ -257,9 +265,11 @@ int main()
     cfg.sets[0].item.clear();
     CHECK(!RequestActiveSetEquipApply(cfg) && g_pendingSetItem == restartItems,
           "panel selection cannot overwrite intentional restart item queue");
+    const int equipBeforeRestart = equipApplyCalls;
     auto restartEquip = Context(); OnApplyResetAndEquip(&restartEquip);
-    CHECK(restartEquip.rax == game::kVtEquipApply && g.equipLoadout == 0,
-          "original restart equipment applies even in quest");
+    CHECK(equipApplyCalls == equipBeforeRestart + 1 && lastEquipObj == At(objects) + 0x5E0 &&
+          restartEquip.rax == 0x71D0 && restartEquip.rbx == 0x02A0 && g.equipLoadout == 0,
+          "original restart equipment applies directly in quest without clobbering msgPlay registers");
     CancelPending(); SetEnabled(false); SetEnabled(true);
     RequestActiveSetEquipApply(cfg);
     CHECK(chats.size() == beforeWarning + 1, "safety warning once survives restart cancellation and Dormant");
@@ -314,10 +324,13 @@ int main()
     c = Context(); OnApplyResetAndEquip(&c);
     CHECK(g_pendingEquipApply.load() == 10, "missing UI chain defers");
     Put(At(equipUi) + 0x2958, At(indexUi));
+    const int equipBeforeSlot10 = equipApplyCalls;
     c = Context(); OnApplyResetAndEquip(&c);
-    CHECK(g_pendingEquipApply.load() == 0 && c.rax == game::kVtEquipApply, "matching game thread call applies without restart");
+    CHECK(g_pendingEquipApply.load() == 0 && equipApplyCalls == equipBeforeSlot10 + 1 &&
+          lastEquipObj == At(objects) + 0x5E0 && c.rax == 0x71D0 && c.rbx == 0x02A0,
+          "matching game thread call applies directly without restart or register clobber");
     CHECK(game::Rd<std::uint32_t>(At(pageUi) + 0x240) == 1 &&
-          game::Rd<std::uint32_t>(At(indexUi) + 0x274) == 1 && c.rdx == 1,
+          game::Rd<std::uint32_t>(At(indexUi) + 0x274) == 1,
           "slot ten translates to page one index one");
     CHECK(g.restart == 0 && g_pendingSetItem == 0, "equipment application has no other action");
 
@@ -542,6 +555,80 @@ int main()
     CHECK(!g_restartItemFromHub.load() && g_restartDepartureItem.load()==0,
           "cancellation clears restart departure origin and selection");
     for (int i=0;i<3;++i) CHECK(game::Rd<std::uint64_t>(sites[i])==originals[i], "private command never patches global instructions");
+
+    // Regression: heap-shifted cGUIInstAnimation pointers (e.g. when font/prefetch mods move
+    // engine allocator offsets away from ...02A0) must still advance equip + hub/quest restart,
+    // throttle within the same frame, and re-latch cleanly after an animation unloads.
+    CancelPending();
+    Put<std::uint32_t>(At(load) + 0x1D04, 0);
+    Put<std::uint32_t>(At(quest) + 0x38, 1);
+    cfg.activeSet = 1;
+    cfg.sets[0].equip = "2";
+    cfg.sets[0].item.clear();
+    RequestRestart(cfg);
+    CHECK(g.equipLoadout == 2 && g.restart == 1, "hub restart arms equip + stage 1");
+
+    const std::uintptr_t shiftedAnimA = 0x419F091FC0ULL;
+    const std::uintptr_t shiftedAnimB = 0x419F092140ULL;
+    const std::uintptr_t shiftedAnimC = 0x419F09ABCDULL;
+    hook::Ctx shifted{};
+    shifted.rax = game::EXE + 0x35171D0;
+    shifted.rbx = shiftedAnimA;
+    const int eqBeforeShifted = equipApplyCalls;
+    OnApplyResetAndEquip(&shifted);
+    CHECK(equipApplyCalls == eqBeforeShifted + 1 && g.equipLoadout == 0 && g.restart == 1 &&
+          shifted.rax == game::EXE + 0x35171D0 && shifted.rbx == shiftedAnimA,
+          "frame 1 shifted heap anim applies equip and keeps stage 1 until next frame");
+
+    hook::Ctx sameFrameOther{};
+    sameFrameOther.rax = game::EXE + 0x35171D0;
+    sameFrameOther.rbx = shiftedAnimB;
+    OnApplyResetAndEquip(&sameFrameOther);
+    CHECK(g.restart == 1, "second animation in same frame is throttled");
+
+    OnApplyResetAndEquip(&shifted);
+    CHECK(g.restart == 3, "frame 2 anchored shifted heap anim advances hub stage 1 -> 3");
+
+    // In-quest reset (st == 2, q+0x54 == 2) using shifted heap animation pointer
+    CancelPending();
+    std::vector<unsigned char> a108(0x300), resetBuf(0x2900), aBase(0x2B00), playerA(0x110), playerPtr(0x7680), hpObj(0x80);
+    Put<std::uintptr_t>(At(ui) + 0xA8, At(aBase) + 0xB0);
+    Put<std::uintptr_t>(At(aBase) + 0xB0 + 0x260, At(resetBuf));
+    if (!MapGlobal(game::pPlayerA)) { std::printf("FAIL: map pPlayerA\n"); return 1; }
+    Put(game::pPlayerA, At(a108));
+    Put(At(a108) + 0x108, At(playerPtr));
+    Put(At(playerPtr) + 0x7670, At(hpObj));
+    Put<float>(At(hpObj) + 0x64, 100.0f);
+    Put<std::uint32_t>(At(quest) + 0x38, 2);
+    Put<std::uint32_t>(At(quest) + 0x54, 2);
+    cfg.activeSet = -1;
+    RequestRestart(cfg);
+    CHECK(g.restart == 1, "in-quest restart arms stage 1");
+    const int resetBefore = resetApplyCalls;
+    OnApplyResetAndEquip(&shifted);
+    CHECK(resetApplyCalls == resetBefore + 1 && lastResetObj == At(resetBuf) + 0x2270 &&
+          lastResetDelta == 1.0f && g.restart == 2 &&
+          game::Rd<std::uint64_t>(At(resetBuf) + 0x2478) == game::kResetCmd &&
+          shifted.rax == game::EXE + 0x35171D0 && shifted.rbx == shiftedAnimA,
+          "in-quest reset executes directly with shifted heap anim and preserves msgPlay registers");
+
+    // Stale anchor (>100ms) re-latches onto a new animation after scene UI reload
+    CancelPending();
+    Put<std::uint32_t>(At(quest) + 0x38, 1);
+    RequestRestart(cfg);
+    OnApplyResetAndEquip(&shifted); // latches shiftedAnimA -> advances to 3
+    CancelPending();
+    RequestRestart(cfg);
+    // Simulate first callback latching shiftedAnimA, then waiting > kGuiAnchorStaleMs before shiftedAnimC arrives
+    g_guiAnchorAnim = shiftedAnimA;
+    g_guiAnchorSeenMs = ::GetTickCount64() - (kGuiAnchorStaleMs + 50ULL);
+    hook::Ctx relatch{};
+    relatch.rax = game::EXE + 0x35171D0;
+    relatch.rbx = shiftedAnimC;
+    OnApplyResetAndEquip(&relatch);
+    CHECK(g.restart == 3 && g_guiAnchorAnim == shiftedAnimC,
+          "stale anchor re-latches cleanly onto live animation after >100ms");
+
     SetEnabled(false);
     std::printf("%d failure(s)\n", failures);
     return failures ? 1 : 0;

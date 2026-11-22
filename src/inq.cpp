@@ -158,10 +158,34 @@ enum MsgBit : std::uint32_t { kMsgEquip = 1, kMsgQuest = 2, kMsgCant = 4, kMsgWi
 
 // ---------------------------------------------------------------------------
 //  ApplyResetAndEquip：原指令 mov rcx,rbx ; call [rax+70]
-//  只在 ax==71D0 && bx==02A0（某个 UI 对象的那一次调用）时介入：
-//    · 有待套用的装备套装 → 借这次调用让游戏自己换装（换虚表、换对象）
-//    · 否则如果请求了重开 → 判断当前能不能重开，能就借这次调用触发游戏的重置
+//  只在 ax==71D0（任意正在播放的 cGUIInstAnimation）时动态锚定一个实例介入：
+//    · 不再硬编码堆对象低 16 位地址（0x02A0），避免前置 mod 改变启动内存布局后失效
+//    · 直接在游戏线程按 __fastcall 调用目标虚函数，不再劫持 msgPlay 的寄存器现场
+//    · 同一帧只推进一次：有待套用装备先换装，否则已请求重开时触发游戏重置
 // ---------------------------------------------------------------------------
+using EquipApplyFn = void(__fastcall*)(std::uintptr_t);
+using ResetApplyFn = void(__fastcall*)(std::uintptr_t, float);
+EquipApplyFn g_equipApplyFn = nullptr;
+ResetApplyFn g_resetApplyFn = nullptr;
+
+std::uintptr_t g_guiAnchorAnim = 0;
+std::uint64_t  g_guiAnchorSeenMs = 0;
+constexpr std::uint64_t kGuiAnchorStaleMs = 100;
+
+EquipApplyFn ResolveEquipApplyFn()
+{
+    if (g_equipApplyFn) return g_equipApplyFn;
+    const std::uintptr_t fn = Rd<std::uintptr_t>(kVtEquipApply + 0x70);
+    return (fn && Readable(fn, 1)) ? reinterpret_cast<EquipApplyFn>(fn) : nullptr;
+}
+
+ResetApplyFn ResolveResetApplyFn()
+{
+    if (g_resetApplyFn) return g_resetApplyFn;
+    const std::uintptr_t fn = Rd<std::uintptr_t>(kVtReset + 0x70);
+    return (fn && Readable(fn, 1)) ? reinterpret_cast<ResetApplyFn>(fn) : nullptr;
+}
+
 void CantQ()
 {
     g.message |= kMsgCant;
@@ -172,7 +196,18 @@ void OnApplyResetAndEquip(Ctx* c)
 {
     ActiveCall call;
     if (!call) return;
-    if ((c->rax & 0xFFFF) != 0x71D0 || (c->rbx & 0xFFFF) != 0x02A0) return;
+    if ((c->rax & 0xFFFF) != 0x71D0) return;
+    if (g.equipLoadout == 0 && g.restart != 1 &&
+        g_pendingEquipApply.load(std::memory_order_relaxed) == 0) return;
+
+    const std::uint64_t nowMs = ::GetTickCount64();
+    if (g_guiAnchorAnim != 0 && c->rbx != g_guiAnchorAnim) {
+        if (nowMs - g_guiAnchorSeenMs < kGuiAnchorStaleMs) return;
+        g_guiAnchorAnim = c->rbx;
+    } else if (g_guiAnchorAnim == 0) {
+        g_guiAnchorAnim = c->rbx;
+    }
+    g_guiAnchorSeenMs = nowMs;
 
     // 立即换装也只能借同一个游戏线程落点提交；读盘或 UI 指针链未就绪时保留请求。
     // 重开仍优先使用它原有的装备队列，不能在重置/接取流程中插入面板换装。
@@ -218,26 +253,21 @@ void OnApplyResetAndEquip(Ctx* c)
         }
         const std::uint32_t page = i / 8, idx = i % 8;
         const std::uintptr_t ui = Ui();
-        const std::uintptr_t rcx = ui ? P(ui + 0x310) : 0;
+        const std::uintptr_t equipUi = ui ? P(ui + 0x310) : 0;
         const std::uintptr_t a60 = ui ? P(ui + 0x60) : 0;
-        if (!rcx || !a60) { g.message |= kMsgEquip; return; }
-        std::uintptr_t r10 = P(rcx + 0x2960);
+        const EquipApplyFn applyFn = ResolveEquipApplyFn();
+        if (!equipUi || a60 < 0x80 || !applyFn) { g.message |= kMsgEquip; return; }
+        const std::uintptr_t rbx = P(a60 + 0x470);
+        if (rbx < 0x5E0) { g.message |= kMsgEquip; return; }
+        std::uintptr_t r10 = P(equipUi + 0x2960);
         Wr<std::uint32_t>(r10 + 0x240, page);
-        r10 = P(rcx + 0x2958);
+        r10 = P(equipUi + 0x2958);
         Wr<std::uint32_t>(r10 + 0x274, idx);
         const std::uintptr_t rdi = a60 - 0x80;
-        const std::uintptr_t rbx = P(a60 + 0x470);
-        const std::uintptr_t rsi = rbx - 0x5E0;
         Wr<std::uint64_t>(rdi + 0x2A60, rdi + 0x2A28);
-        Wr<std::uint64_t>(rdi + 0x2A30, rcx);
+        Wr<std::uint64_t>(rdi + 0x2A30, equipUi);
         Wr<std::uint64_t>(rdi + 0x2A28, kEquipCmd);
-        c->rax = kVtEquipApply;
-        c->rbx = rbx;
-        c->rcx = rcx;
-        c->rdx = idx;          // div ebx 之后 edx = 余数（高 32 位清零）
-        c->rdi = rdi;
-        c->rsi = rsi;
-        c->r10 = r10;
+        applyFn(rbx);
         return;
     }
 
@@ -302,12 +332,13 @@ void OnApplyResetAndEquip(Ctx* c)
         Wr<std::uint32_t>(pl + 0x62B8, 0);
     }
 
-    // resetmain：借这次调用触发游戏自己的重置函数
+    // resetmain：在游戏线程里直接触发游戏自己的重置函数，不改动 msgPlay 原寄存器
     const std::uintptr_t a = P(ui + 0xA8);
-    if (!a) { CantQ(); return; }
+    if (a < 0xB0) { CantQ(); return; }
     const std::uintptr_t rdi = a - 0xB0;
     const std::uintptr_t rsi = P(a + 0x260);
-    if (!rsi) { CantQ(); return; }
+    const ResetApplyFn resetFn = ResolveResetApplyFn();
+    if (!rsi || !resetFn) { CantQ(); return; }
     Wr<std::uint64_t>(rsi + 0x2478, kResetCmd);
     Wr<std::uint64_t>(rsi + 0x2480, rsi + 0x1850);
     Wr<std::uint64_t>(rsi + 0x24B0, rsi + 0x2478);
@@ -316,10 +347,7 @@ void OnApplyResetAndEquip(Ctx* c)
     Wr<std::uint8_t>(rdi + 0x2348, 0xC9);
     Wr<float>(rsi + 0x2410, 10.0f);
     Wr<std::uint32_t>(rsi + 0x2888, 0xA);
-    c->rax = kVtReset;
-    c->rbx = rsi + 0x2270;
-    c->rdi = rdi;
-    c->rsi = rsi;
+    resetFn(rsi + 0x2270, 1.0f);
 }
 
 // ---------------------------------------------------------------------------
@@ -865,6 +893,8 @@ void ClearPendingAfterDrain()
     g_pendingLink = false;
     g_hasPendingLink = false;
     g.message = 0;
+    g_guiAnchorAnim = 0;
+    g_guiAnchorSeenMs = 0;
     g_enteredQuest.exchange(0, std::memory_order_acq_rel);
 }
 } // namespace
