@@ -23,6 +23,7 @@ std::string ToUtf8(const std::wstring& w)
 {
     if (w.empty()) return std::string();
     const int n = ::WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return std::string();
     std::string s(n, '\0');
     ::WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &s[0], n, nullptr, nullptr);
     return s;
@@ -32,6 +33,7 @@ std::wstring ToWide(const std::string& s)
 {
     if (s.empty()) return std::wstring();
     const int n = ::MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
+    if (n <= 0) return std::wstring();
     std::wstring w(n, L'\0');
     ::MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &w[0], n);
     return w;
@@ -56,13 +58,17 @@ void Log(const char* fmt, ...)
     char line[1100];
     const int n = std::snprintf(line, sizeof(line), "%02u:%02u:%02u.%03u %s\r\n",
                                 st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, body);
+    if (n <= 0) return;
+    const DWORD toWrite = (n < static_cast<int>(sizeof(line)))
+                              ? static_cast<DWORD>(n)
+                              : static_cast<DWORD>(sizeof(line) - 1);
     std::lock_guard<std::mutex> lk(g_logMx);
     if (g_logPath.empty()) return;
     HANDLE h = ::CreateFileW(g_logPath.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
                              OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return;
     DWORD wr = 0;
-    ::WriteFile(h, line, (DWORD)n, &wr, nullptr);
+    ::WriteFile(h, line, toWrite, &wr, nullptr);
     ::CloseHandle(h);
 }
 

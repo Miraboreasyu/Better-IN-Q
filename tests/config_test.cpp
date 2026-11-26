@@ -52,6 +52,7 @@ int main()
     CHECK(c.hkPanel == "LB+LT+X | Insert", "默认面板键 = %s", c.hkPanel.c_str());
     CHECK(c.hkResetOnly == "LB+RB+L3+R3 | Home", "默认只重置键 = %s", c.hkResetOnly.c_str());
     CHECK(!c.palicoEnabled, "随从套装功能默认关闭");
+    CHECK(!c.apiEnabled && c.apiWhitelist.empty(), "插件白名单 API 默认关闭且白名单为空");
     c.palicoEnabled = true;
     std::string global, slot;
     SerializeConfigParts(c, global, slot);
@@ -578,6 +579,37 @@ int main()
         CHECK(ParseConfigText("[Set.1]\nName=legacy\n", after, error) && after.sets[0].palicoDeploy == -1 &&
               after.sets[0].palicoLevel == 0 && after.sets[0].palicoGadget == -1 && after.sets[0].palicoGadgetLevel == 0,
               "legacy loadouts leave every Palico field unchanged");
+    }
+
+    {
+        const std::wstring baseP = TempFile(L"cfg_api_base.ini");
+        const std::wstring profP = TempFile(L"cfg_api_prof.ini");
+        ::DeleteFileW(baseP.c_str());
+        ::DeleteFileW(profP.c_str());
+
+        Config c;
+        c.apiEnabled = true;
+        c.apiWhitelist = "auto_quest_start.dll,thk.*.dll:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        c.nextSetId = 15;
+        c.nextFoodId = 9;
+        LoadoutSet s; s.id = 4; s.name = "main";
+        c.sets.push_back(s);
+        CHECK(SaveSplit(baseP, profP, c), "带 [Api] 与 tombstone 计数的分拆保存成功");
+
+        Config loaded;
+        std::string err2;
+        CHECK(LoadSplit(baseP, profP, loaded, err2), "LoadSplit 读回成功");
+        CHECK(loaded.apiEnabled && loaded.apiWhitelist == c.apiWhitelist,
+              "[Api] 配置经 SaveSplit/LoadSplit 完整保留");
+        CHECK(loaded.nextSetId == 15 && loaded.nextFoodId == 9,
+              "LoadSplit 保留 nextSetId / nextFoodId 防止删除后的编号被复用");
+
+        std::string gPart, sPart;
+        SerializeConfigParts(c, gPart, sPart);
+        CHECK(gPart.find("[Api]") == std::string::npos,
+              "便携 SerializeConfigParts 不包含本机 [Api] 白名单");
+        ::DeleteFileW(baseP.c_str());
+        ::DeleteFileW(profP.c_str());
     }
     std::printf("\n%s（%d 项失败）\n", g_fail ? "有失败" : "全部通过", g_fail);
     return g_fail ? 1 : 0;

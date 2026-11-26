@@ -2,13 +2,13 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cctype>
 
 namespace i18n {
 namespace {
 
-Lang g_lang = kZh;
-bool g_loaded = false;
+std::atomic<int> g_lang{-1};
 
 Lang GuessSystem()
 {
@@ -38,14 +38,20 @@ Lang SystemLang() { return GuessSystem(); }
 
 Lang Current()
 {
-    if (!g_loaded) { g_lang = GuessSystem(); g_loaded = true; }
-    return g_lang;
+    int v = g_lang.load(std::memory_order_acquire);
+    if (v < 0) {
+        int guessed = static_cast<int>(GuessSystem());
+        if (g_lang.compare_exchange_strong(v, guessed, std::memory_order_acq_rel, std::memory_order_acquire)) {
+            v = guessed;
+        }
+    }
+    return (v >= 0 && v < kCount) ? static_cast<Lang>(v) : kZh;
 }
 
 void Set(Lang l)
 {
-    g_lang = (l >= 0 && l < kCount) ? l : kZh;
-    g_loaded = true;
+    const int val = (l >= 0 && l < kCount) ? static_cast<int>(l) : static_cast<int>(kZh);
+    g_lang.store(val, std::memory_order_release);
 }
 
 Lang FromString(const std::string& s)

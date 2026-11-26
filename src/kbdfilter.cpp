@@ -90,7 +90,8 @@ bool UnderWindowsDir(const wchar_t* path)
     const UINT n = ::GetWindowsDirectoryW(win, MAX_PATH);
     if (!n || n >= MAX_PATH) return false;
     const std::size_t len = std::wcslen(win);
-    return ::_wcsnicmp(path, win, len) == 0;
+    return ::_wcsnicmp(path, win, len) == 0 &&
+           (path[len] == L'\\' || path[len] == L'/' || path[len] == L'\0');
 }
 
 // 游戏本体 + 它带的那些 DLL（模组、中间件）都可能读键盘；系统 DLL 不用扫

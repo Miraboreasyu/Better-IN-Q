@@ -15,8 +15,8 @@ std::mutex g_mx;
 
 bool InRel32(std::uintptr_t from, std::uintptr_t to)
 {
-    const std::int64_t d = (std::int64_t)to - (std::int64_t)from;
-    return d >= INT32_MIN && d <= INT32_MAX;
+    if (to >= from) return (to - from) <= static_cast<std::uintptr_t>(INT32_MAX);
+    return (from - to) <= static_cast<std::uintptr_t>(INT32_MAX) + 1U;
 }
 
 std::uintptr_t TryAllocAt(std::uintptr_t addr, std::size_t size)
@@ -250,20 +250,35 @@ int ReplaceModulePointers(std::uintptr_t base, void* oldPtr, void* newPtr, const
     int n = 0;
     for (WORD k = 0; k < nt->FileHeader.NumberOfSections; ++k) {
         if (sec[k].Characteristics & IMAGE_SCN_MEM_EXECUTE) continue;
-        const std::uintptr_t a = base + sec[k].VirtualAddress;
-        const std::size_t len = sec[k].Misc.VirtualSize & ~std::size_t(7);
-        for (std::size_t o = 0; o < len; o += 8) {
-            void** slot = reinterpret_cast<void**>(a + o);
-            if (*slot != oldPtr) continue;
-            if (skipLo && reinterpret_cast<const void*>(slot) >= skipLo && reinterpret_cast<const void*>(slot) < skipHi)
-                continue;
-            WriteMem(reinterpret_cast<std::uintptr_t>(slot), &newPtr, sizeof(newPtr));
-            if (where) {
-                char buf[32];
-                std::snprintf(buf, sizeof(buf), "%.8s+%zx ", reinterpret_cast<const char*>(sec[k].Name), o);
-                *where += buf;
+        const std::uintptr_t secStart = base + sec[k].VirtualAddress;
+        const std::size_t secLen = sec[k].Misc.VirtualSize & ~std::size_t(7);
+        const std::uintptr_t secEnd = secStart + secLen;
+        for (std::uintptr_t cur = secStart; cur < secEnd;) {
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (!::VirtualQuery(reinterpret_cast<LPCVOID>(cur), &mbi, sizeof(mbi)) || mbi.RegionSize == 0) {
+                break;
             }
-            ++n;
+            const std::uintptr_t regEnd = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+            const std::uintptr_t chunkEnd = (regEnd < secEnd) ? regEnd : secEnd;
+            const bool canRead = mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD));
+            if (canRead && chunkEnd > cur) {
+                const std::uintptr_t alignedEnd = cur + ((chunkEnd - cur) & ~std::uintptr_t(7));
+                for (std::uintptr_t addr = cur; addr < alignedEnd; addr += 8) {
+                    void** slot = reinterpret_cast<void**>(addr);
+                    if (*slot != oldPtr) continue;
+                    if (skipLo && reinterpret_cast<const void*>(slot) >= skipLo && reinterpret_cast<const void*>(slot) < skipHi)
+                        continue;
+                    WriteMem(reinterpret_cast<std::uintptr_t>(slot), &newPtr, sizeof(newPtr));
+                    if (where) {
+                        char buf[32];
+                        std::snprintf(buf, sizeof(buf), "%.8s+%zx ", reinterpret_cast<const char*>(sec[k].Name),
+                                      static_cast<std::size_t>(addr - secStart));
+                        *where += buf;
+                    }
+                    ++n;
+                }
+            }
+            cur = (chunkEnd > cur) ? chunkEnd : secEnd;
         }
     }
     return n;

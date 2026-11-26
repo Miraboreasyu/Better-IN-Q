@@ -60,8 +60,22 @@ inline bool Readable(std::uintptr_t a, std::size_t n)
     MEMORY_BASIC_INFORMATION mbi{};
     if (!::VirtualQuery(reinterpret_cast<LPCVOID>(a), &mbi, sizeof(mbi))) return false;
     if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return false;
-    const std::uintptr_t end = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
-    return a + n <= end;
+    const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
+    const std::uintptr_t end  = base + mbi.RegionSize;
+    return a >= base && n <= end - a;
+}
+
+inline bool Writable(std::uintptr_t a, std::size_t n)
+{
+    if (a < 0x10000) return false;
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (!::VirtualQuery(reinterpret_cast<LPCVOID>(a), &mbi, sizeof(mbi))) return false;
+    if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return false;
+    constexpr DWORD kWriteMask = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    if ((mbi.Protect & kWriteMask) == 0) return false;
+    const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
+    const std::uintptr_t end  = base + mbi.RegionSize;
+    return a >= base && n <= end - a;
 }
 
 template <class T> inline T Rd(std::uintptr_t a)
@@ -72,7 +86,7 @@ template <class T> inline T Rd(std::uintptr_t a)
 }
 template <class T> inline bool Wr(std::uintptr_t a, T v)
 {
-    if (!Readable(a, sizeof(T))) return false;
+    if (!Writable(a, sizeof(T))) return false;
     std::memcpy(reinterpret_cast<void*>(a), &v, sizeof(T));
     return true;
 }
@@ -84,7 +98,8 @@ inline std::uintptr_t SaveSlot()
     const std::uintptr_t s = P(pSave);
     if (!s) return 0;
     const std::uintptr_t base = P(s + 0xA8);
-    return base ? base + Rd<std::uint64_t>(s + 0xA0) * kSaveSlotSize : 0;
+    const std::uint64_t idx = Rd<std::uint64_t>(s + 0xA0);
+    return (base && idx < 3) ? base + idx * kSaveSlotSize : 0;
 }
 inline std::uintptr_t Ui() { const std::uintptr_t b = P(pUiBase); return b ? P(b + 0x278) : 0; }
 inline bool InScene() { const std::uintptr_t m = P(pPlayerRoot); return m && P(m + 0x50); }

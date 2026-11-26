@@ -309,6 +309,8 @@ bool ImportFile(const Storage& storage,const std::wstring& source,const std::wst
     if(!WriteNew(recovery,bytes))return Fail(err,"Recovery backup failed; import aborted");
     backupPath=recovery;
     incoming.global.questId=0;
+    incoming.global.apiEnabled=live.apiEnabled;
+    incoming.global.apiWhitelist=live.apiWhitelist;
     for(auto& c:incoming.slots)c.ResetSessionSelection();
     Config published=incoming.global;
     const Config& slot=incoming.slots[storage.currentSlot-1];
@@ -319,7 +321,7 @@ bool ImportFile(const Storage& storage,const std::wstring& source,const std::wst
     std::array<std::string,4> texts,original;
     std::array<bool,4> had{};
     targets[0]=storage.globalPath;std::string unused;
-    SerializeConfigParts(incoming.global,texts[0],unused);
+    SerializeConfigPartsWithApi(incoming.global,texts[0],unused);
     for(int i=1;i<4;++i){targets[i]=storage.slotPaths[i-1];SerializeConfigParts(incoming.slots[i-1],unused,texts[i]);}
     auto cleanup=[&]() {for(auto& p:stages)if(!p.empty())::DeleteFileW(p.c_str());for(auto& p:oldFiles)if(!p.empty())::DeleteFileW(p.c_str());};
     for(int i=0;i<4;++i) {

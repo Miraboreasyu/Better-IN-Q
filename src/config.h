@@ -64,6 +64,10 @@ struct Config {
     bool refillHotkey = false;                        // 手动补全快捷键总开关，默认关闭
     bool itemAutoApply = true;                        // 进任务自动套用道具套装 + 跳过确认框（读屏障）
 
+    // [Api] 本机插件白名单（不随 .biq 便携备份导出/导入）
+    bool apiEnabled = false;
+    std::string apiWhitelist;
+
     std::vector<LoadoutSet> sets;
     std::map<int, FoodPreset> foods;
     // 猫饭在面板里的显示顺序（只存编号，纯 UI 顺序；猫饭本身的编号永远不变）
@@ -138,3 +142,4 @@ bool SaveSplit(const std::wstring& basePath, const std::wstring& profPath, const
 // Pure text helpers: no file reads, default creation, migration or persistence.
 bool ParseConfigText(const std::string& text, Config& cfg, std::string& err);
 void SerializeConfigParts(const Config& cfg, std::string& global, std::string& slot);
+void SerializeConfigPartsWithApi(const Config& cfg, std::string& global, std::string& slot);

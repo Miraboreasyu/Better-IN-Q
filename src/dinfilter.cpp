@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -47,8 +48,9 @@ struct Slot {
     GetStateFn state;
     GetDataFn data;
 };
+std::mutex g_patchMx;
 Slot g_slots[8] = {};
-int g_nslots = 0;
+std::atomic<int> g_nslots{0};
 
 std::atomic<bool> g_block{false};
 bool g_installed = false;
@@ -57,7 +59,8 @@ std::atomic<int> g_devices{0};           // 截到几台游戏设备
 Slot* Find(void* self)
 {
     void** vt = *reinterpret_cast<void***>(self);
-    for (int i = 0; i < g_nslots; ++i)
+    const int n = g_nslots.load(std::memory_order_acquire);
+    for (int i = 0; i < n; ++i)
         if (g_slots[i].vt == vt) return &g_slots[i];
     return nullptr;
 }
@@ -87,8 +90,9 @@ bool PatchSlot(void** slot, void* fn)
 {
     DWORD old = 0;
     if (!::VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) return false;
-    *slot = fn;
-    ::VirtualProtect(slot, sizeof(void*), old, &old);
+    ::InterlockedExchangePointer(slot, fn);
+    DWORD unused = 0;
+    ::VirtualProtect(slot, sizeof(void*), old, &unused);
     ::FlushInstructionCache(::GetCurrentProcess(), slot, sizeof(void*));
     return true;
 }
@@ -96,14 +100,21 @@ bool PatchSlot(void** slot, void* fn)
 // 第 9 项 GetDeviceState、第 10 项 GetDeviceData（IUnknown 占 0~2，GetCapabilities 是第 4 项）
 bool PatchVtable(void** vt)
 {
+    std::lock_guard<std::mutex> lk(g_patchMx);
     if (!vt || !vt[9] || !vt[10]) return false;
-    for (int i = 0; i < g_nslots; ++i)
+    if (vt[9] == reinterpret_cast<void*>(HkGetDeviceState) ||
+        vt[10] == reinterpret_cast<void*>(HkGetDeviceData)) {
+        return true;
+    }
+    const int n = g_nslots.load(std::memory_order_relaxed);
+    for (int i = 0; i < n; ++i)
         if (g_slots[i].vt == vt) return true;
-    if (g_nslots >= 8) return false;
-    Slot& s = g_slots[g_nslots++];
+    if (n >= 8) return false;
+    Slot& s = g_slots[n];
     s.vt = vt;
     s.state = reinterpret_cast<GetStateFn>(vt[9]);
     s.data = reinterpret_cast<GetDataFn>(vt[10]);
+    g_nslots.store(n + 1, std::memory_order_release);
     return PatchSlot(&vt[9], reinterpret_cast<void*>(HkGetDeviceState)) &&
            PatchSlot(&vt[10], reinterpret_cast<void*>(HkGetDeviceData));
 }
@@ -121,6 +132,7 @@ HRESULT WINAPI HkCreateDevice(void* self, const GUID& guid, void** out, IUnknown
 
 void PatchDi(void* di)
 {
+    std::lock_guard<std::mutex> lk(g_patchMx);
     if (g_diVt) return;
     void** vt = *reinterpret_cast<void***>(di);
     if (!vt || !vt[3]) return;
@@ -142,7 +154,8 @@ bool UnderWindowsDir(const wchar_t* path)
     wchar_t win[MAX_PATH] = {};
     const UINT n = ::GetWindowsDirectoryW(win, MAX_PATH);
     if (!n || n >= MAX_PATH) return false;
-    return ::_wcsnicmp(path, win, std::wcslen(win)) == 0;
+    return ::_wcsnicmp(path, win, n) == 0 &&
+           (path[n] == L'\\' || path[n] == L'/' || path[n] == L'\0');
 }
 
 std::vector<std::uintptr_t> Targets()
@@ -194,13 +207,14 @@ bool CreateOwn(const CreateFn create, std::string& info)
     if (kb) kb->Release();
     if (ms) ms->Release();
     di->Release();
-    if (!g_nslots) {
+    const int nslots = g_nslots.load(std::memory_order_acquire);
+    if (!nslots) {
         info = i18n::Tr("建不了 DirectInput 键盘/鼠标设备", "cannot create a DirectInput keyboard/mouse device",
                         "DirectInput のキーボード／マウスを作成できません");
         return false;
     }
-    Log("dinfilter: 自己建了设备，换掉 %d 张虚表（DinCreate=1）", g_nslots);
-    info = i18n::Fmt(i18n::Tr("设备虚表 x%d（自建）", "device vtables x%d (own)", "デバイス仮想表 x%d（自前）"), g_nslots);
+    Log("dinfilter: 自己建了设备，换掉 %d 张虚表（DinCreate=1）", nslots);
+    info = i18n::Fmt(i18n::Tr("设备虚表 x%d（自建）", "device vtables x%d (own)", "デバイス仮想表 x%d（自前）"), nslots);
     g_installed = true;
     return true;
 }
@@ -242,17 +256,18 @@ bool Install(std::string& info)
     std::string own;
     const bool ownOk = CreateOwn(g_realCreate, own);
     if (ownOk) g_installed = true;
+    const int nslots = g_nslots.load(std::memory_order_acquire);
     if (!hits && !ownOk) {
         info = i18n::Tr("游戏模块里没找到 DirectInput8Create，也建不了自己的设备",
                         "no DirectInput8Create pointer in game modules, and cannot create our own device",
                         "ゲームのモジュールに DirectInput8Create のポインタがなく、自前のデバイスも作れません");
         return false;
     }
-    if (g_nslots) g_installed = true;
+    if (nslots) g_installed = true;
     info = ownOk
                ? i18n::Fmt(i18n::Tr("DirectInput8Create x%d + 设备虚表 x%d", "DirectInput8Create x%d + vtables x%d",
                                     "DirectInput8Create x%d + 仮想表 x%d"),
-                           hits, g_nslots)
+                           hits, nslots)
                : i18n::Fmt(i18n::Tr("DirectInput8Create x%d", "DirectInput8Create x%d", "DirectInput8Create x%d"), hits);
     return true;
 }
@@ -263,7 +278,7 @@ void SetBlock(bool block) { g_block.store(block, std::memory_order_relaxed); }
 
 void ResetStats() { g_devices.store(0); }
 
-int Vtables() { return g_nslots; }
+int Vtables() { return g_nslots.load(std::memory_order_acquire); }
 
 int GameDevices() { return g_devices.load(); }
 
@@ -271,7 +286,7 @@ std::string Stats()
 {
     std::string s = i18n::Fmt(i18n::Tr("设备虚表 %d 张（游戏建设备 %d 次）", "%d device vtable(s), %d created by the game",
                                        "デバイス仮想表 %d 枚（ゲームが %d 回作成）"),
-                              g_nslots, g_devices.load());
+                              g_nslots.load(std::memory_order_acquire), g_devices.load());
     return s;
 }
 

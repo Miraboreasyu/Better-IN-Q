@@ -5,16 +5,20 @@
 //  修 bug / 加功能后重新分发；CT 的中文化与修改由 QCanon 完成。
 // ============================================================================
 #include <windows.h>
+#include <intrin.h>
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <vector>
 
+#include "api.h"
 #include "config.h"
 #include "chat_once.h"
 #include "game.h"
+#include "gamedata.h"
 #include "startup_gate.h"
 #include "crashfilter.h"
 #include "cursorfilter.h"
@@ -249,6 +253,7 @@ DWORD WINAPI Worker(LPVOID)
     const std::wstring dir = ModuleDir() + L"BetterINQ\\";
     ::CreateDirectoryW(dir.c_str(), nullptr);
     LogInit(dir + L"BetterINQ.log");
+    api::Init(g_module);
     ::AddVectoredExceptionHandler(1, OnCrash);   // 崩溃时把出错地址写进日志
     hangdump::Init();                            // 现在就把 dbghelp 拿好，退出卡住时才有栈可看
 
@@ -263,36 +268,45 @@ DWORD WINAPI Worker(LPVOID)
 
     Hotkeys hk;
     std::wstring autoSrc;      // 插件目录旁边有没有原版 config.txt（第一次运行自动导入用）
+    std::string cfgDebugDisable;
+    bool cfgDebugPalicoProbe = false;
+    bool cfgDebugNoWndHook = false;
+    bool cfgForceQuit = true;
     {
         std::lock_guard<std::mutex> lk(g_mx);
         std::string err;
         if (!LoadSplit(basePath, cfgPath, g_cfg, err)) Log("config: %s", err.c_str());
         i18n::Set(i18n::FromString(g_cfg.language));   // 越早越好：后面的日志和提示都按它来
         hdr::Configure(g_cfg.hdr, g_cfg.sdrNits);      // HDR 交换链上的面板颜色修正
-        Log("config: QuestID=%d Reset=%d AcceptOnly=%d Wyvern=%d ActiveSet=%d Food=%d 全套%zu 猫饭%zu",
+        api::Configure(g_cfg.apiEnabled, g_cfg.apiWhitelist);
+        Log("config: QuestID=%d Reset=%d AcceptOnly=%d Wyvern=%d ActiveSet=%d Food=%d 全套%zu 猫饭%zu Api=%d",
             g_cfg.questId, g_cfg.reset, g_cfg.acceptOnly, g_cfg.wyvern, g_cfg.activeSet, g_cfg.food,
-            g_cfg.sets.size(), g_cfg.foods.size());
+            g_cfg.sets.size(), g_cfg.foods.size(), g_cfg.apiEnabled ? 1 : 0);
         g_model.cfg = &g_cfg;
         g_model.version = kVersion;
         g_model.slot = profile::Slot();   // 设置页里那排 1/2/3 的当前值
         g_model.backupsDir = dir + L"backups\\";
         autoSrc = inqimport::Resolve("", basePath);   // 旁边有就顺手带上
         if (!autoSrc.empty()) Log("import: 旁边有原版 config.txt：%s", inqimport::Narrow(autoSrc).c_str());
-        hk.Parse(g_cfg);
-    }
-    // 第一次装的时候：旁边有原版 IN-Q 的 config.txt 就把全套直接搬过来，省得手写
-    if (g_cfg.sets.empty() && !autoSrc.empty()) {
-        std::string ierr, inotes;
-        const int n = inqimport::Import(autoSrc, g_cfg, ierr, &inotes);
-        if (n > 0) {
-            if (!SaveSplit(basePath, cfgPath, g_cfg)) Log("config: 存盘失败");
-            Log("import: 从原版 IN-Q 导入了 %d 个全套（%s）", n, inotes.c_str());
-        } else {
-            Log("import: %s", ierr.c_str());
+        // 第一次装的时候：旁边有原版 IN-Q 的 config.txt 就把全套直接搬过来，省得手写
+        if (g_cfg.sets.empty() && !autoSrc.empty()) {
+            std::string ierr, inotes;
+            const int n = inqimport::Import(autoSrc, g_cfg, ierr, &inotes);
+            if (n > 0) {
+                if (!SaveSplit(basePath, cfgPath, g_cfg)) Log("config: 存盘失败");
+                Log("import: 从原版 IN-Q 导入了 %d 个全套（%s）", n, inotes.c_str());
+            } else {
+                Log("import: %s", ierr.c_str());
+            }
         }
+        hk.Parse(g_cfg);
+        cfgDebugDisable     = g_cfg.debugDisable;
+        cfgDebugPalicoProbe = g_cfg.debugPalicoProbe;
+        cfgDebugNoWndHook   = g_cfg.debugNoWndHook;
+        cfgForceQuit        = g_cfg.debugForceQuit;
     }
 
-    const Disabled off = ParseDisabled(g_cfg.debugDisable);
+    const Disabled off = ParseDisabled(cfgDebugDisable);
     if (off.pad || off.cursor || off.kbd || off.din || off.overlay || off.ime)
         Log("debug: 关掉了过滤器 pad=%d cursor=%d kbd=%d din=%d overlay=%d ime=%d", off.pad, off.cursor,
             off.kbd, off.din, off.overlay, off.ime);
@@ -305,9 +319,13 @@ DWORD WINAPI Worker(LPVOID)
     std::uintptr_t linkedSaveBase = 0;
     bool palicoRestorePending = false;
     ULONGLONG palicoRestoreRetry = 0;
+    api::ExternalSessionOverrides extOverrides;
+    Config lastUiBaseline;
+    std::int32_t itemStoreToDisplay[81]{};
+    auto effectiveCfg = [&]() { return extOverrides.ApplyTo(g_cfg); };
     // Publishing options before association must not briefly reopen writers.
     auto publishOptions = [&](bool resetFood = false) {
-        Config options = g_cfg;
+        Config options = effectiveCfg();
         options.enabled = options.enabled && characterLinked;
         inq::ApplyOptions(options, resetFood);
     };
@@ -315,6 +333,7 @@ DWORD WINAPI Worker(LPVOID)
     bool ok;
     {
         std::lock_guard<std::mutex> lk(g_mx);
+        lastUiBaseline = g_cfg;
         Config installConfig = g_cfg; installConfig.enabled = false;
         ok = inq::Install(installConfig, report);
         g_model.ready = ok;
@@ -326,13 +345,13 @@ DWORD WINAPI Worker(LPVOID)
     {
         std::string palicoError;
         if (!palico::ResolveLoadoutApply(game::EXE,palicoError)) Log("%s",palicoError.c_str());
-        if (g_cfg.debugPalicoProbe) Log("palico: legacy entry probe disabled; it changes the apply signature");
+        if (cfgDebugPalicoProbe) Log("palico: legacy entry probe disabled; it changes the apply signature");
     }
     overlay::Callbacks cb;
     cb.init = OnOverlayInit;
     cb.opened = OnOverlayOpened;
     cb.draw = OnOverlayDraw;
-    if (g_cfg.debugNoWndHook) overlay::SetWndHook(false);
+    if (cfgDebugNoWndHook) overlay::SetWndHook(false);
     startup::Gate startupGate;
     bool panelOk = false;
     if (off.overlay) Log("debug: overlay 关掉了，没有面板（快捷键重开照常）");
@@ -373,8 +392,9 @@ DWORD WINAPI Worker(LPVOID)
             // （诊断线程是独立线程，不依赖主循环，也不依赖我们的收尾是否跑完）。
             hangdump::Arm(6000, 14000);
             SetPanel(false);       // 面板要是还开着，先把四路输入过滤全放开，别带着拦截进退出流程
+            api::Shutdown();
             overlay::ShutdownForExit();
-            if (g_cfg.debugForceQuit) {
+            if (cfgForceQuit) {
                 // 兜底：窗口已销毁、我们的收尾也做完了，游戏自己卡在 DXGI/音频销毁里不走
                 // （画面没了、BGM 还在、手柄还能动）。窗口既然没了，存档早已落盘，
                 // 10 秒（3 + 7）还没退就由我们把进程带走。
@@ -484,11 +504,13 @@ DWORD WINAPI Worker(LPVOID)
         const bool open = overlay::IsOpen();
         const bool restartKey = in.Fired(hk.restart);       // 面板开着时不响应，免得在面板里误触
         const bool resetKey = in.Fired(hk.resetOnly);
-        const bool refillKey = g_cfg.refillHotkey && in.Fired(hk.refill);
+        const bool refillFired = in.Fired(hk.refill);
 
         {
             std::lock_guard<std::mutex> lk(g_mx);
             ui::Model& m = g_model;
+            cfgForceQuit = g_cfg.debugForceQuit;
+            const bool refillKey = g_cfg.refillHotkey && refillFired;
 
             if (m.reqExportSettings) {
                 m.reqExportSettings = false;
@@ -526,6 +548,9 @@ DWORD WINAPI Worker(LPVOID)
                 if (settings_transfer::ImportFile(settings_transfer::CurrentStorage(), source, m.backupsDir, g_cfg, backup, error)) {
                     m.reqSave = false;
                     dirtyAt = 0;
+                    extOverrides.Clear();
+                    lastUiBaseline = g_cfg;
+                    api::Configure(g_cfg.apiEnabled, g_cfg.apiWhitelist);
                     publishOptions(true); // Imported IDs must not retain the old effective meal.
                     i18n::Set(i18n::FromString(g_cfg.language));
                     hdr::Configure(g_cfg.hdr, g_cfg.sdrNits);
@@ -552,6 +577,7 @@ DWORD WINAPI Worker(LPVOID)
             if (titleNow && !atTitle) {
                 characterLinked = false;
                 palicoRestorePending = false; palicoRestoreRetry = 0;
+                extOverrides.Clear();
                 inq::SetEnabled(false);
                 if (palico::EndCharacterSession())
                     Log("palico: character session ended; old snapshot discarded, durable backups retained");
@@ -582,6 +608,9 @@ DWORD WINAPI Worker(LPVOID)
                         cfgPath=target;
                         g_cfg=std::move(next);
                         characterLinked = true;
+                        extOverrides.Clear();
+                        lastUiBaseline = g_cfg;
+                        api::Configure(g_cfg.apiEnabled, g_cfg.apiWhitelist);
                         publishOptions(true);
                         m.reqRestart=m.reqResetOnly=m.reqApplyEquip=false;
                         m.reqSave=false; dirtyAt=0;
@@ -633,11 +662,11 @@ DWORD WINAPI Worker(LPVOID)
             const runtime::HotkeyActions actions = runtime::GateHotkeys(runtimeMode, false,
                                                                        sceneActions && restartKey,
                                                                        sceneActions && resetKey);
-            auto requestRestart = [&]() {
-                const auto* set = g_cfg.FindSetById(g_cfg.activeSet);
+            auto requestRestart = [&](const Config& runCfg) {
+                const auto* set = runCfg.FindSetById(runCfg.activeSet);
                 // No prompt: the panel already shows these values and the restart
                 // hotkey must stay usable with a gamepad.
-                if (set && g_cfg.palicoEnabled && runtimeMode == runtime::Mode::Active && startupGate.AllowsActions() &&
+                if (set && runCfg.palicoEnabled && runtimeMode == runtime::Mode::Active && startupGate.AllowsActions() &&
                     !m.reqSlot && !m.reqImportInq && inq::g.restart == 0 && inq::Ready() &&
                     (set->palicoDeploy >= 0 || set->palicoLevel > 0 || set->palicoGadget >= 0 ||
                      set->palicoGadgetLevel > 0 || set->palicoLoadout > 0)) {
@@ -656,7 +685,7 @@ DWORD WINAPI Worker(LPVOID)
                         if (!result.ok) { Chat(std::string("Better-IN-Q: Palico: ") + result.error); return; }
                     }
                 }
-                inq::RequestRestart(g_cfg);
+                inq::RequestRestart(runCfg);
             };
             auto palicoRestore = [&]() -> bool {
                 std::string restoreError;
@@ -666,17 +695,17 @@ DWORD WINAPI Worker(LPVOID)
                 }
                 return true;
             };
-            if (!open && actions.restart) { Log("hotkey: restart"); requestRestart(); }
+            if (!open && actions.restart) { Log("hotkey: restart"); requestRestart(effectiveCfg()); }
             if (!open && actions.resetOnly) { Log("hotkey: reset only"); inq::RequestResetOnly(); palicoRestorePending = true; }
             if (!open && refillKey && runtimeMode == runtime::Mode::Active && sceneActions) {
                 Log("hotkey: refill");
-                inq::RequestPouchRefill(g_cfg);
+                inq::RequestPouchRefill(effectiveCfg());
             }
 
             if (m.reqClose) { m.reqClose = false; SetPanel(false); }
             if (m.reqRestart) {
                 m.reqRestart = false;
-                if (runtimeMode == runtime::Mode::Active && sceneActions) { Log("panel: restart"); requestRestart(); }
+                if (runtimeMode == runtime::Mode::Active && sceneActions) { Log("panel: restart"); requestRestart(effectiveCfg()); }
             }
             if (m.reqResetOnly) {
                 m.reqResetOnly = false;
@@ -690,7 +719,195 @@ DWORD WINAPI Worker(LPVOID)
             if (m.reqApplyEquip) {
                 m.reqApplyEquip = false;
                 if (runtimeMode == runtime::Mode::Active && profileLinked && !m.reqSlot && !m.reqImportInq)
-                    inq::RequestActiveSetEquipApply(g_cfg);
+                    inq::RequestActiveSetEquipApply(effectiveCfg());
+            }
+
+            for (const auto& cmd : api::TakePendingCommands()) {
+                std::int32_t res = BETTERINQ_OK;
+                if (cmd.kind != api::CommandKind::CancelPending && runtimeMode != runtime::Mode::Active) {
+                    res = BETTERINQ_ERR_DORMANT;
+                } else if (!inq::Ready()) {
+                    res = BETTERINQ_ERR_NOT_READY;
+                } else {
+                    switch (cmd.kind) {
+                    case api::CommandKind::PatchSessionConfig: {
+                        const auto& p = cmd.patch;
+                        if ((p.fieldMask & BETTERINQ_PATCH_ACTIVE_SET) &&
+                            p.activeSet != -1 && !g_cfg.FindSetById(p.activeSet)) {
+                            res = BETTERINQ_ERR_NOT_FOUND;
+                            break;
+                        }
+                        if ((p.fieldMask & BETTERINQ_PATCH_FOOD) &&
+                            p.food != -1 && !g_cfg.foods.count(p.food)) {
+                            res = BETTERINQ_ERR_NOT_FOUND;
+                            break;
+                        }
+                        if ((p.fieldMask & BETTERINQ_PATCH_QUEST_ID) &&
+                            p.questId != 0 && !gamedata::ValidQuestId(p.questId)) {
+                            res = BETTERINQ_ERR_INVALID_ARG;
+                            break;
+                        }
+                        if (p.fieldMask & BETTERINQ_PATCH_ACTIVE_SET) {
+                            extOverrides.hasActiveSet = true;
+                            extOverrides.activeSet = p.activeSet;
+                        }
+                        if (p.fieldMask & BETTERINQ_PATCH_QUEST_ID) {
+                            extOverrides.hasQuestId = true;
+                            extOverrides.questId = p.questId;
+                        }
+                        if (p.fieldMask & BETTERINQ_PATCH_FOOD) {
+                            extOverrides.hasFood = true;
+                            extOverrides.food = p.food;
+                        }
+                        if (p.fieldMask & BETTERINQ_PATCH_RESET) {
+                            extOverrides.hasReset = true;
+                            extOverrides.reset = p.reset != 0;
+                        }
+                        if (p.fieldMask & BETTERINQ_PATCH_ACCEPT_ONLY) {
+                            extOverrides.hasAcceptOnly = true;
+                            extOverrides.acceptOnly = p.acceptOnly != 0;
+                        }
+                        if (p.fieldMask & BETTERINQ_PATCH_WYVERN) {
+                            extOverrides.hasWyvern = true;
+                            extOverrides.wyvern = p.wyvern != 0;
+                        }
+                        publishOptions();
+                        break;
+                    }
+                    case api::CommandKind::ResetSessionOverrides:
+                        extOverrides.Clear();
+                        publishOptions(true);
+                        break;
+                    case api::CommandKind::PersistConfig:
+                        extOverrides.CommitTo(g_cfg);
+                        extOverrides.Clear();
+                        lastUiBaseline = g_cfg;
+                        publishOptions();
+                        if (!SaveSplit(basePath, cfgPath, g_cfg)) {
+                            Log("api: PersistConfig SaveSplit failed");
+                            res = BETTERINQ_ERR_IO_FAILED;
+                        }
+                        break;
+                    case api::CommandKind::RequestRestart: {
+                        if (!profileLinked) { res = BETTERINQ_ERR_NOT_LINKED; break; }
+                        if (!startupGate.AllowsActions() || m.reqSlot || m.reqImportInq) {
+                            res = BETTERINQ_ERR_BUSY;
+                            break;
+                        }
+                        if (inq::g.restart != 0) { res = BETTERINQ_ERR_BUSY; break; }
+                        Config runCfg = effectiveCfg();
+                        if (cmd.hasRestartParams) {
+                            const auto& rp = cmd.restart;
+                            if (rp.flags & BETTERINQ_RESTART_OVERRIDE_SET) {
+                                if (rp.setId != -1 && !runCfg.FindSetById(rp.setId)) {
+                                    res = BETTERINQ_ERR_NOT_FOUND;
+                                    break;
+                                }
+                                runCfg.activeSet = rp.setId;
+                            }
+                            if (rp.flags & BETTERINQ_RESTART_OVERRIDE_QUEST) {
+                                if (rp.questId != 0 && !gamedata::ValidQuestId(rp.questId)) {
+                                    res = BETTERINQ_ERR_INVALID_ARG;
+                                    break;
+                                }
+                                runCfg.questId = rp.questId;
+                            }
+                            if (rp.flags & BETTERINQ_RESTART_OVERRIDE_RESET) {
+                                runCfg.reset = rp.reset != 0;
+                            }
+                            if (rp.flags & BETTERINQ_RESTART_OVERRIDE_ACCEPT_ONLY) {
+                                runCfg.acceptOnly = rp.acceptOnly != 0;
+                            }
+                            if (rp.flags & BETTERINQ_RESTART_OVERRIDE_WYVERN) {
+                                runCfg.wyvern = rp.wyvern != 0;
+                            }
+                        }
+                        Log("api: restart requested");
+                        requestRestart(runCfg);
+                        break;
+                    }
+                    case api::CommandKind::RequestResetOnly:
+                        if (!profileLinked) { res = BETTERINQ_ERR_NOT_LINKED; break; }
+                        if (!startupGate.AllowsActions() || m.reqSlot || m.reqImportInq || inq::g.restart != 0) {
+                            res = BETTERINQ_ERR_BUSY;
+                            break;
+                        }
+                        Log("api: reset only requested");
+                        inq::RequestResetOnly();
+                        palicoRestorePending = true;
+                        break;
+                    case api::CommandKind::RequestApplyActiveSet:
+                        if (!profileLinked) { res = BETTERINQ_ERR_NOT_LINKED; break; }
+                        if (m.reqSlot || m.reqImportInq || inq::g.restart != 0) {
+                            res = BETTERINQ_ERR_BUSY;
+                            break;
+                        }
+                        if (!inq::RequestActiveSetEquipApply(effectiveCfg())) {
+                            res = BETTERINQ_ERR_UNSAFE_STAGE;
+                        }
+                        break;
+                    case api::CommandKind::RequestApplyLoadout: {
+                        if (!profileLinked) { res = BETTERINQ_ERR_NOT_LINKED; break; }
+                        if (m.reqSlot || m.reqImportInq || inq::g.restart != 0) {
+                            res = BETTERINQ_ERR_BUSY;
+                            break;
+                        }
+                        const auto& lp = cmd.loadout;
+                        if (lp.equip < 0 || lp.equip > 224 || lp.item < 0 || lp.item > 80) {
+                            res = BETTERINQ_ERR_INVALID_ARG;
+                            break;
+                        }
+                        int itemDisplay = lp.item;
+                        if (itemDisplay > 0 && (lp.flags & BETTERINQ_LOADOUT_ITEM_IS_STORE)) {
+                            itemDisplay = inq::ResolveItem(std::string("#") + std::to_string(lp.item));
+                            if (itemDisplay <= 0) {
+                                res = BETTERINQ_ERR_NOT_FOUND;
+                                break;
+                            }
+                        }
+                        const bool allowInQuest  = (lp.flags & BETTERINQ_LOADOUT_ALLOW_IN_QUEST) != 0;
+                        const bool hasLinkRadial = (lp.flags & BETTERINQ_LOADOUT_SET_LINK_RADIAL) != 0;
+                        const bool linkRadial    = (lp.flags & BETTERINQ_LOADOUT_LINK_RADIAL) != 0;
+                        if (!inq::RequestExplicitLoadout(effectiveCfg(), lp.equip, itemDisplay,
+                                                         hasLinkRadial, linkRadial, lp.food, allowInQuest)) {
+                            res = BETTERINQ_ERR_UNSAFE_STAGE;
+                        }
+                        break;
+                    }
+                    case api::CommandKind::RequestQueueSet:
+                        if (!profileLinked) { res = BETTERINQ_ERR_NOT_LINKED; break; }
+                        if (m.reqSlot || m.reqImportInq || inq::g.restart != 0) {
+                            res = BETTERINQ_ERR_BUSY;
+                            break;
+                        }
+                        if (!g_cfg.FindSetById(cmd.setId)) {
+                            res = BETTERINQ_ERR_NOT_FOUND;
+                            break;
+                        }
+                        if (!inq::QueueLoadoutSetById(effectiveCfg(), cmd.setId)) {
+                            res = BETTERINQ_ERR_UNSAFE_STAGE;
+                            break;
+                        }
+                        extOverrides.hasActiveSet = true;
+                        extOverrides.activeSet = cmd.setId;
+                        publishOptions();
+                        break;
+                    case api::CommandKind::RequestPouchRefill:
+                        if (!profileLinked) { res = BETTERINQ_ERR_NOT_LINKED; break; }
+                        if (!startupGate.AllowsActions() || m.reqSlot || m.reqImportInq || inq::g.restart != 0) {
+                            res = BETTERINQ_ERR_BUSY;
+                            break;
+                        }
+                        if (!inq::RequestPouchRefill(effectiveCfg(), true)) {
+                            res = BETTERINQ_ERR_UNSAFE_STAGE;
+                        }
+                        break;
+                    case api::CommandKind::CancelPending:
+                        inq::CancelPending();
+                        break;
+                    }
+                }
+                api::CompleteCommand(cmd.requestId, res);
             }
             if (m.reqImportInq) {        // 设置页的文件选择框里挑好了 config.txt
                 m.reqImportInq = false;
@@ -728,6 +945,7 @@ DWORD WINAPI Worker(LPVOID)
                 if (const int entered = inq::TakeEnteredQuest()) {
                     if (g_cfg.questId != entered) {
                         g_cfg.questId = entered;
+                        lastUiBaseline.questId = entered;
                         m.reqSave = true;
                         Log("quest: 进过 %d，全局任务跟着改成它", entered);
                     }
@@ -737,6 +955,13 @@ DWORD WINAPI Worker(LPVOID)
             }
             if (m.reqSave) {             // 设置马上生效；写盘等停手 0.4 秒，免得打一个字存一次
                 m.reqSave = false;
+                if (g_cfg.activeSet  != lastUiBaseline.activeSet)  extOverrides.hasActiveSet  = false;
+                if (g_cfg.questId    != lastUiBaseline.questId)    extOverrides.hasQuestId    = false;
+                if (g_cfg.food       != lastUiBaseline.food)       extOverrides.hasFood       = false;
+                if (g_cfg.reset      != lastUiBaseline.reset)      extOverrides.hasReset      = false;
+                if (g_cfg.acceptOnly != lastUiBaseline.acceptOnly) extOverrides.hasAcceptOnly = false;
+                if (g_cfg.wyvern     != lastUiBaseline.wyvern)     extOverrides.hasWyvern     = false;
+                lastUiBaseline = g_cfg;
                 g_refreshNames = true;
                 publishOptions();
                 dirtyAt = now;
@@ -754,11 +979,17 @@ DWORD WINAPI Worker(LPVOID)
                 m.equipNames.clear();
                 m.itemNames.clear();
                 m.palicoNames.clear();
+                std::memset(itemStoreToDisplay, 0, sizeof(itemStoreToDisplay));
                 if (g_cfg.palicoEnabled) {
                     for (const auto& p : inq::ListPalicoLoadouts()) m.palicoNames.push_back({p.number, p.name, p.store});
                 }
                 for (const auto& e : inq::ListEquipLoadouts()) m.equipNames.push_back({e.number, e.name, e.store});
-                for (const auto& it : inq::ListItemLoadouts()) m.itemNames.push_back({it.number, it.name, it.store});
+                for (const auto& it : inq::ListItemLoadouts()) {
+                    m.itemNames.push_back({it.number, it.name, it.store});
+                    if (it.store >= 1 && it.store <= 80 && it.number >= 1 && it.number <= 80) {
+                        itemStoreToDisplay[it.store] = it.number;
+                    }
+                }
             }
             // 0.7.1 及以前面板把装备/道具套装按名字存进 ini，删掉读取兼容之后这些值没人认了。
             // 进存档、拿得到游戏里的名单之后换成编号并写回（一次性改写，不是读取兼容）。
@@ -767,6 +998,7 @@ DWORD WINAPI Worker(LPVOID)
                 if (const int changed = inq::MigrateLoadoutRefs(g_cfg)) {
                     migrated = true;
                     if (!SaveSplit(basePath, cfgPath, g_cfg)) Log("config: 存盘失败");
+                    lastUiBaseline = g_cfg;
                     publishOptions();
                     g_refreshNames = true;
                     Chat(i18n::Fmt(i18n::Tr("Better-IN-Q：老配置里的套装名字已换成编号（%d 处）；没对上的已留空，请到套装页重选",
@@ -782,7 +1014,7 @@ DWORD WINAPI Worker(LPVOID)
                 lastTick = now;
                 LARGE_INTEGER t0, t1;
                 ::QueryPerformanceCounter(&t0);
-                inq::Tick(g_cfg);
+                inq::Tick(effectiveCfg());
                 ::QueryPerformanceCounter(&t1);
                 const double us = QpcUs((unsigned long long)(t1.QuadPart - t0.QuadPart));
                 tickSum += us;
@@ -790,6 +1022,15 @@ DWORD WINAPI Worker(LPVOID)
                 ++tickN;
                 m.status = LastChat(6000);
             }
+            api::PublishSnapshot(g_model.ready,
+                                 runtimeMode == runtime::Mode::Active,
+                                 characterLinked,
+                                 startupGate.StartupReady(),
+                                 m.slot,
+                                 inq::QueryLiveContext(),
+                                 effectiveCfg(),
+                                 extOverrides.Any(),
+                                 itemStoreToDisplay);
         }
         FlushChat();
         ::Sleep(16);
@@ -800,6 +1041,15 @@ DWORD WINAPI Worker(LPVOID)
 } // namespace
 
 extern "C" __declspec(dllexport) BOOL BetterINQ_IsInstalled() { return TRUE; }
+
+__declspec(noinline) extern "C" __declspec(dllexport) int32_t BetterINQ_AcquireApi(
+    uint32_t apiVersion,
+    const char* callerTag,
+    BetterINQ_Session* outSession,
+    BetterINQ_ApiV1* outApi)
+{
+    return api::AcquireFromCaller(_ReturnAddress(), apiVersion, callerTag, outSession, outApi);
+}
 
 // 崩溃时留个记录：异常码、出错地址（哪个模块 + 偏移）、线程、以及当时在哪个钩子里。
 // 只写日志，不吞异常（EXCEPTION_CONTINUE_SEARCH），游戏该崩还是崩 —— 我们要的是线索。

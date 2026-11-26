@@ -70,7 +70,7 @@ bool Bool(const std::string& v) { return v == "1" || v == "true" || v == "on" ||
 namespace {
 
 // 配置 → ini 文本。默认配置和面板保存共用这一份模板。
-std::string Render(const Config& c)
+std::string Render(const Config& c, bool includeApi = true)
 {
     auto kv = [](const char* k, const std::string& v, const char* note) {
         std::string line = std::string(k) + "=" + v;
@@ -189,6 +189,17 @@ std::string Render(const Config& c)
     o += kv("Refill", c.hkRefill, i18n::Tr("手动把当前道具套装的数量补满，留空 = 关闭",
                                              "Manually refill the active item loadout's counts; empty = off",
                                              "現在のアイテムセットの数量を手動で補充。空 = 無効"));
+    if (includeApi) {
+        o += "\r\n[Api]\r\n";
+        o += kv("Enabled", c.apiEnabled ? "1" : "0",
+                i18n::Tr("1 = 允许白名单插件调用自动化 API（默认 0）",
+                         "1 = allow whitelisted plugins to call automation API (default 0)",
+                         "1 = ホワイトリスト済みプラグインからの自動化 API 呼び出しを許可（既定 0）"));
+        o += kv("Whitelist", c.apiWhitelist,
+                i18n::Tr("逗号分隔：文件名（支持前缀通配如 thk.*.dll）、64位 SHA256，或 文件名:SHA256",
+                         "Comma-separated: filename (prefix glob like thk.*.dll allowed), 64-hex SHA256, or file:sha256",
+                         "カンマ区切り：ファイル名（thk.*.dll 等の前方一致可）、64桁 SHA256、または file:sha256"));
+    }
     o += i18n::Tr("\r\n; 全套：段名是编号；Equip 写装备套装编号，Item 写道具套装的存放格 \"#编号\"\r\n",
                   "\r\n; Loadout: the section name is the number; Equip takes the equip loadout number,\r\n"
                   "; Item takes the item loadout storage slot as \"#number\"\r\n",
@@ -424,6 +435,8 @@ void SwitchProfile(Config& cur, const std::wstring& fromPath, const std::wstring
     cur.foodOrder = other.FoodIds();
     cur.activeSet = other.activeSet;
     cur.food = other.food;
+    cur.nextSetId = other.nextSetId;
+    cur.nextFoodId = other.nextFoodId;
     SaveConfig(toPath, cur);
 }
 
@@ -548,7 +561,12 @@ bool SaveSplitImpl(const std::wstring& basePath, const std::wstring& profPath,
 
 void SerializeConfigParts(const Config& cfg, std::string& global, std::string& slot)
 {
-    SplitText(Render(cfg), global, slot);
+    SplitText(Render(cfg, false), global, slot);
+}
+
+void SerializeConfigPartsWithApi(const Config& cfg, std::string& global, std::string& slot)
+{
+    SplitText(Render(cfg, true), global, slot);
 }
 
 bool SaveSplit(const std::wstring& basePath, const std::wstring& profPath, const Config& cfg)
@@ -578,6 +596,8 @@ bool LoadSplit(const std::wstring& basePath, const std::wstring& profPath, Confi
     cfg.foodOrder = fromProf.foodOrder;
     cfg.activeSet = fromProf.activeSet;
     cfg.food = fromProf.food;
+    cfg.nextSetId = fromProf.nextSetId;
+    cfg.nextFoodId = fromProf.nextFoodId;
     return true;
 }
 
@@ -680,6 +700,9 @@ bool ParseConfigText(const std::string& text, Config& cfg, std::string& err)
             else if (k == "Panel") cfg.hkPanel = v;
             else if (k == "ResetOnly") cfg.hkResetOnly = v;
             else if (k == "Refill") cfg.hkRefill = v;
+        } else if (sec == "Api") {
+            if (k == "Enabled") cfg.apiEnabled = Bool(v);
+            else if (k == "Whitelist") cfg.apiWhitelist = v;
         } else if (curSet) {
             if (k == "Name") curSet->name = v;
             else if (k == "Equip") curSet->equip = v;

@@ -11,11 +11,11 @@ param([string]$What = "all")
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Out = Join-Path $Root "out"
-$Obj = Join-Path $Out "obj"
-$IM = Join-Path $Root "third_party\imgui"
-$Src = Join-Path $Root "src"
-$Tests = Join-Path $Root "tests"
+$Out = "out"
+$Obj = "out\obj"
+$IM = "third_party\imgui"
+$Src = "src"
+$Tests = "tests"
 
 Push-Location $Root
 try {
@@ -86,12 +86,12 @@ $ImGuiCore = $ImGuiObjs[0..3]
 if ($What -eq "dll" -or $What -eq "all") {
     Write-Host "==> BetterINQ.dll"
     Build-ImGui
-    $srcs = @("main", "inq", "hook", "config", "input", "log",
+    $srcs = @("main", "inq", "api", "hook", "config", "input", "log",
               "ui", "gamedata", "overlay", "padfilter", "cursorfilter", "kbdfilter", "dinfilter",
               "hdr", "inqimport", "profile", "hangdump", "settings_transfer", "canteen_rules", "palico_rules", "palico_memory", "palico_apply",
               "i18n") |
             ForEach-Object { Join-Path $Src "$_.cpp" }
-    Compile ($Common + @("/LD", "/I$IM", "/Isrc", "/Fe$Out\BetterINQ.dll", "/Fo$Obj\") +
+    Compile ($Common + @("/LD", "/I$IM", "/Iinclude", "/Isrc", "/Fe$Out\BetterINQ.dll", "/Fo$Obj\") +
         $srcs + $ImGuiObjs + @("/link", "/IMPLIB:$Obj\BetterINQ.lib") + $D3D11 + $WinLibs)
     $dll = Join-Path $Out "BetterINQ.dll"
     if (-not (Test-Path $dll)) { throw "没生成 $dll" }
@@ -210,9 +210,13 @@ if ($What -eq "test" -or $What -eq "all") {
     Compile ($Common + @("/Fo$Obj\", "/Isrc", "/Fe$Out\palico_memory_test.exe", "$Tests\palico_memory_test.cpp", "$Src\palico_memory.cpp") + @("/link"))
     Compile ($Common + @("/Fo$Obj\", "/Isrc", "/Fe$Out\palico_apply_test.exe", "$Tests\palico_apply_test.cpp", "$Src\palico_apply.cpp", "$Src\palico_memory.cpp", "$Src\palico_rules.cpp", "$Src\hook.cpp") + @("/link"))
     Compile ($Common + @("/Fo$Obj\", "/Isrc", "/Fe$Out\palico_loadout_call_test.exe", "$Tests\palico_loadout_call_test.cpp", "$Src\palico_memory.cpp", "$Src\palico_rules.cpp", "$Src\hook.cpp") + @("/link"))
+    Compile ($Common + @("/Fo$Obj\", "/Iinclude", "/Isrc", "/Fe$Out\api_test.exe",
+        "$Tests\api_test.cpp", "$Src\api.cpp", "$Src\config.cpp", "$Src\gamedata.cpp", "$Src\log.cpp",
+        "$Src\i18n.cpp", "$Src\settings_transfer.cpp", "$Src\profile.cpp") +
+        @("/link") + $WinLibs)
     $fail = 0
     foreach ($t in @("hook_test", "gamedata_test", "config_test", "cursor_test", "kbdfilter_test", "hdr_test", "profile_test", "inqimport_test",
-                     "dinfilter_test", "ui_nav_test", "window_chain_test", "ime_test", "runtime_state_test", "restart_watchdog_test", "inq_restart_watchdog_test", "inq_equip_apply_test", "panel_gamepad_gate_test", "settings_transfer_test", "chat_once_test", "canteen_rules_test", "palico_rules_test", "palico_memory_test", "palico_apply_test", "palico_loadout_call_test")) {
+                     "dinfilter_test", "ui_nav_test", "window_chain_test", "ime_test", "runtime_state_test", "restart_watchdog_test", "inq_restart_watchdog_test", "inq_equip_apply_test", "panel_gamepad_gate_test", "settings_transfer_test", "chat_once_test", "canteen_rules_test", "palico_rules_test", "palico_memory_test", "palico_apply_test", "palico_loadout_call_test", "api_test")) {
         Write-Host "  run $t.exe"
         & (Join-Path $Out "$t.exe")
         if ($LASTEXITCODE -ne 0) { $fail = $fail + 1 }
@@ -220,7 +224,7 @@ if ($What -eq "test" -or $What -eq "all") {
     # 这两个要一个输出目录当参数（截图存在那儿）
     foreach ($t in @("overlay_test", "overlay_dx12_test")) {
         Write-Host "  run $t.exe"
-        & (Join-Path $Out "$t.exe") $Out
+        & (Join-Path $Out "$t.exe") (Resolve-Path $Out).Path
         if ($LASTEXITCODE -ne 0) { $fail = $fail + 1 }
     }
 

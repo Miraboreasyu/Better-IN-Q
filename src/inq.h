@@ -62,13 +62,31 @@ bool RequestEquipApply(const Config& cfg, const std::string& equip);
 // activeSet 为空/不存在时仅取消未提交的立即装备待办，不脱装备。
 bool RequestActiveSetEquipApply(const Config& cfg);
 
+struct LiveContext {
+    std::uint32_t stage = 0;        // pQuest+0x38 (0=unknown, 1=hub, 2=quest, 4/5=post, 0xD=expedition)
+    std::uint8_t  loading = 2;      // 0=idle, 1=loading, 2=unknown
+    int           restartStage = 0; // g.restart (0..4)
+    int           enteredQuest = 0; // last entered quest observed by worker hooks
+};
+LiveContext QueryLiveContext();
+
+// Explicit loadout apply queued from the Worker thread under g_mx.
+bool RequestExplicitLoadout(const Config& cfg,
+                            int equip,
+                            int itemDisplay,
+                            bool hasLinkRadial,
+                            bool linkRadial,
+                            int food,
+                            bool allowInQuest);
+bool QueueLoadoutSetById(const Config& cfg, int setId);
+
 // 只重置（原 IN-Q 的 Reset only / INQ+6）：把当前任务重置掉、回据点，不接任务也不出发。
 // 不套用全套配置 —— 这一趟只是把任务清掉。
 void RequestResetOnly();
 
 // 手动把当前套装里道具套装的数量补满（不换套装、不改道具种类）。
 // 会核对当前袋里每个格子的 id 已经是该套装的 id，没换好就等 2 秒再放弃。
-bool RequestPouchRefill(const Config& cfg);
+bool RequestPouchRefill(const Config& cfg, bool ignoreHotkeyGate = false);
 
 // 历史接口名保留：现在仅启用 BIQ 专属道具命令（免确认并联动快捷栏）。
 // 不再改写游戏代码、设置读取或原生菜单；关闭后沿用原生命令。

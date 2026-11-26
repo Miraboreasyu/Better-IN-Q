@@ -115,6 +115,7 @@ std::atomic<int> g_enteredQuest{0};
 // 只用于面板主动选择的立即换装；不与重开的装备待办共用，避免改变重开状态机。
 // 主循环发布，游戏线程消费；后一次选择覆盖前一次，0 取消尚未提交的请求。
 std::atomic<int> g_pendingEquipApply{0};
+std::atomic<bool> g_externalAllowInQuest{false};
 int g_enteredSeen = 0;   // 只在游戏线程里读写
 // Process lifetime: cancellation, slot switches and Dormant must not reset this.
 bool g_warnedUnsafeEquip = false;
@@ -156,6 +157,17 @@ void WarnUnsafeEquipOnce()
 
 enum MsgBit : std::uint32_t { kMsgEquip = 1, kMsgQuest = 2, kMsgCant = 4, kMsgWindow = 8, kMsgNoQuest = 16 };
 
+inline void SetMsgBit(std::uint32_t bit) noexcept
+{
+    ::InterlockedOr(reinterpret_cast<volatile LONG*>(&g.message), static_cast<LONG>(bit));
+}
+
+inline std::uint32_t TakeMsgBits() noexcept
+{
+    return static_cast<std::uint32_t>(
+        ::InterlockedExchange(reinterpret_cast<volatile LONG*>(&g.message), 0));
+}
+
 // ---------------------------------------------------------------------------
 //  ApplyResetAndEquip：原指令 mov rcx,rbx ; call [rax+70]
 //  只在 ax==71D0（任意正在播放的 cGUIInstAnimation）时动态锚定一个实例介入：
@@ -188,7 +200,7 @@ ResetApplyFn ResolveResetApplyFn()
 
 void CantQ()
 {
-    g.message |= kMsgCant;
+    SetMsgBit(kMsgCant);
     g.restart = 0;
 }
 
@@ -217,9 +229,13 @@ void OnApplyResetAndEquip(Ctx* c)
         if (immediate != 0) {
             // A hub-side request may reach this callback only after quest entry.
             // Cancel it rather than carrying an unsafe selection back to a hub.
-            if (!SafeImmediateEquip()) {
-                if (g_pendingEquipApply.compare_exchange_strong(immediate, 0, std::memory_order_acq_rel))
+            // Explicit API requests with BETTERINQ_LOADOUT_ALLOW_IN_QUEST opt into in-quest apply.
+            if (!SafeImmediateEquip() &&
+                !g_externalAllowInQuest.load(std::memory_order_acquire)) {
+                if (g_pendingEquipApply.compare_exchange_strong(immediate, 0, std::memory_order_acq_rel)) {
+                    g_externalAllowInQuest.store(false, std::memory_order_release);
                     g_deferredUnsafeEquipWarning.store(true, std::memory_order_release);
+                }
                 return;
             }
             const std::uintptr_t ui = Ui();
@@ -230,12 +246,13 @@ void OnApplyResetAndEquip(Ctx* c)
             const std::uintptr_t pageUi = equipUi ? P(equipUi + 0x2960) : 0;
             const std::uintptr_t indexUi = equipUi ? P(equipUi + 0x2958) : 0;
             const std::uintptr_t equipObject = a60 ? P(a60 + 0x470) : 0;
-            if (!load || Rd<std::uint32_t>(load + 0x1D04) != 0 || !slot ||
+            if (!load || !Readable(load + 0x1D04, 4) || Rd<std::uint32_t>(load + 0x1D04) != 0 || !slot ||
                 !equipUi || a60 < 0x80 || !pageUi || !indexUi || equipObject < 0x5E0 ||
                 !Readable(slot + 0x10CCF4 + std::uintptr_t(immediate - 1) * 0x2B0, 4) ||
                 !Readable(pageUi + 0x240, 4) || !Readable(indexUi + 0x274, 4) ||
                 !Readable(a60 - 0x80 + 0x2A28, 0x40)) return;
             if (!g_pendingEquipApply.compare_exchange_strong(immediate, 0, std::memory_order_acq_rel)) return;
+            g_externalAllowInQuest.store(false, std::memory_order_release);
         }
     }
 
@@ -243,12 +260,12 @@ void OnApplyResetAndEquip(Ctx* c)
     if (g.equipLoadout != 0 || immediate != 0) {
         const std::uint32_t n = immediate ? (std::uint32_t)immediate : (std::uint32_t)g.equipLoadout;
         if (!immediate) g.equipLoadout = 0;
-        if (n > 224) { g.message |= kMsgEquip; return; }           // popp：寄存器原样
+        if (n > 224) { SetMsgBit(kMsgEquip); return; }           // popp：寄存器原样
         const std::uintptr_t slot = SaveSlot();
-        if (!slot) { g.message |= kMsgEquip; return; }
+        if (!slot) { SetMsgBit(kMsgEquip); return; }
         const std::uint32_t i = n - 1;
         if (Rd<std::uint32_t>(slot + std::uintptr_t(i) * 0x2B0 + 0x10CCF4) == 0xFFFFFFFF) {
-            g.message |= kMsgEquip;                                  // 这一格没放武器 = 空套装
+            SetMsgBit(kMsgEquip);                                  // 这一格没放武器 = 空套装
             return;
         }
         const std::uint32_t page = i / 8, idx = i % 8;
@@ -256,9 +273,9 @@ void OnApplyResetAndEquip(Ctx* c)
         const std::uintptr_t equipUi = ui ? P(ui + 0x310) : 0;
         const std::uintptr_t a60 = ui ? P(ui + 0x60) : 0;
         const EquipApplyFn applyFn = ResolveEquipApplyFn();
-        if (!equipUi || a60 < 0x80 || !applyFn) { g.message |= kMsgEquip; return; }
+        if (!equipUi || a60 < 0x80 || !applyFn) { SetMsgBit(kMsgEquip); return; }
         const std::uintptr_t rbx = P(a60 + 0x470);
-        if (rbx < 0x5E0) { g.message |= kMsgEquip; return; }
+        if (rbx < 0x5E0) { SetMsgBit(kMsgEquip); return; }
         std::uintptr_t r10 = P(equipUi + 0x2960);
         Wr<std::uint32_t>(r10 + 0x240, page);
         r10 = P(equipUi + 0x2958);
@@ -276,7 +293,7 @@ void OnApplyResetAndEquip(Ctx* c)
     const std::uintptr_t ui = Ui();
     if (!ui) { CantQ(); return; }
     const std::uintptr_t load = P(ui + 0x20);
-    if (Rd<std::uint32_t>(load + 0x1D04) != 0) { CantQ(); return; }   // 正在读盘
+    if (!load || !Readable(load + 0x1D04, 4) || Rd<std::uint32_t>(load + 0x1D04) != 0) { CantQ(); return; }   // 正在读盘
     const std::uintptr_t q = P(pQuest);
     if (!q) { CantQ(); return; }
     const std::uint32_t st = Rd<std::uint32_t>(q + 0x38);
@@ -309,7 +326,7 @@ void OnApplyResetAndEquip(Ctx* c)
         if (g.optResetOnly) {
             g.optResetOnly = 0;
             g.restart = 0;
-            g.message |= kMsgNoQuest;
+            SetMsgBit(kMsgNoQuest);
             return;
         }
         g.restart = 3;
@@ -357,7 +374,7 @@ void OnApplyResetAndEquip(Ctx* c)
 // ---------------------------------------------------------------------------
 void Stop(Ctx* c, std::uintptr_t rax)
 {
-    g.message |= kMsgQuest;
+    SetMsgBit(kMsgQuest);
     g.restart = 0;
     c->rax = rax;
 }
@@ -389,7 +406,7 @@ void OnQuestLoad(Ctx* c)
 
     const std::uintptr_t load = P(ui + 0x20);
     c->rax = load;
-    if (Rd<std::uint32_t>(load + 0x1D04) != 0) return;                // 还在读盘
+    if (!load || !Readable(load + 0x1D04, 4) || Rd<std::uint32_t>(load + 0x1D04) != 0) return;                // 还在读盘
     const std::uintptr_t pb = P(P(pPlayerB) + 0x108);
     const std::uintptr_t q = P(pQuest);
     c->rbx = pb;
@@ -436,6 +453,7 @@ bool BytesAre(std::uintptr_t a, const char* hex)
     std::size_t n = 0;
     for (const char* p = hex; *p && n < sizeof(want);) {
         if (*p == ' ') { ++p; continue; }
+        if (!p[1]) return false;
         want[n++] = (std::uint8_t)std::strtoul(std::string(p, 2).c_str(), nullptr, 16);
         p += 2;
     }
@@ -879,6 +897,7 @@ void ClearPendingAfterDrain()
     g.palicoLoadout = 0;
     g.itemLoadout = 0;
     g_pendingEquipApply.store(0, std::memory_order_release);
+    g_externalAllowInQuest.store(false, std::memory_order_release);
     g_pendingSetItem = 0; g_explicitHubItem = false;
     g_immediateSetItem = false;
     g_refillPlan = {};
@@ -962,9 +981,11 @@ bool RequestEquipApply(const Config& cfg, const std::string& equip)
     const int n = equip.empty() ? 0 : ResolveEquip(equip);
     if (n && !SafeImmediateEquip()) {
         g_pendingEquipApply.store(0, std::memory_order_release);
+        g_externalAllowInQuest.store(false, std::memory_order_release);
         WarnUnsafeEquipOnce();
         return false;
     }
+    g_externalAllowInQuest.store(false, std::memory_order_release);
     g_pendingEquipApply.store(n, std::memory_order_release);
     return equip.empty() || n != 0;
 }
@@ -1000,6 +1021,7 @@ bool RequestActiveSetEquipApply(const Config& cfg)
     // Deliberate restart QueueSet is a different path: never alter its queued
     // equipment here. Ordinary active-set selection in the field is item-only.
     g_pendingEquipApply.store(0, std::memory_order_release);
+    g_externalAllowInQuest.store(false, std::memory_order_release);
     WarnUnsafeEquipOnce();
     if (!ItemSelectionContext(g_immediateItemStage)) return false;
     const int item = s->item.empty() ? 0 : ResolveItem(s->item);
@@ -1008,6 +1030,77 @@ bool RequestActiveSetEquipApply(const Config& cfg)
     g_pendingLink = s->linkRadial;
     g_hasPendingLink = item != 0;
     return s->item.empty() || item != 0;
+}
+
+LiveContext QueryLiveContext()
+{
+    LiveContext ctx;
+    ctx.restartStage = g.restart;
+    ctx.enteredQuest = g_enteredSeen;
+    const std::uintptr_t q = P(pQuest);
+    if (q && Readable(q + 0x38, 4)) {
+        ctx.stage = Rd<std::uint32_t>(q + 0x38);
+    }
+    const std::uintptr_t ui = Ui();
+    const std::uintptr_t load = ui ? P(ui + 0x20) : 0;
+    if (load && Readable(load + 0x1D04, 4)) {
+        ctx.loading = Rd<std::uint32_t>(load + 0x1D04) != 0 ? 1 : 0;
+    }
+    return ctx;
+}
+
+bool RequestExplicitLoadout(const Config& cfg,
+                            int equip,
+                            int itemDisplay,
+                            bool hasLinkRadial,
+                            bool linkRadial,
+                            int food,
+                            bool allowInQuest)
+{
+    ActiveCall call;
+    if (!call || !cfg.enabled || !g_ready || g.restart != 0) return false;
+    if (equip < 0 || equip > 224 || itemDisplay < 0 || itemDisplay > 80) return false;
+    if (food > 0 && !cfg.foods.count(food)) return false;
+
+    if (equip > 0) {
+        if (!allowInQuest && !SafeImmediateEquip()) {
+            return false;
+        }
+        const std::uintptr_t slot = SaveSlot();
+        if (!slot || !Readable(slot + std::uintptr_t(equip - 1) * 0x2B0 + 0x10CCF4, 4) ||
+            Rd<std::uint32_t>(slot + std::uintptr_t(equip - 1) * 0x2B0 + 0x10CCF4) == 0xFFFFFFFF) {
+            return false;
+        }
+        g_externalAllowInQuest.store(allowInQuest, std::memory_order_release);
+        g_pendingEquipApply.store(equip, std::memory_order_release);
+    }
+    if (food == -1 || food > 0) {
+        g.food = food;
+    }
+    if (itemDisplay > 0) {
+        const std::uintptr_t slot = SaveSlot();
+        const int st = slot ? ItemStoreOfDisplay(slot, itemDisplay) : 0;
+        if (!slot || !st || !Readable(slot + std::uintptr_t(st) * 0x768 + 0x278, 4) ||
+            Rd<std::uint32_t>(slot + std::uintptr_t(st) * 0x768 + 0x278) == 0) {
+            return false;
+        }
+        g_pendingSetItem = itemDisplay;
+        g_immediateSetItem = false;
+        g_explicitHubItem = false;
+        g_hasPendingLink = hasLinkRadial;
+        g_pendingLink = linkRadial;
+    }
+    return true;
+}
+
+bool QueueLoadoutSetById(const Config& cfg, int setId)
+{
+    ActiveCall call;
+    if (!call || !cfg.enabled || !g_ready || g.restart != 0 || setId <= 0) return false;
+    const LoadoutSet* s = cfg.FindSetById(setId);
+    if (!s) return false;
+    QueueSet(*s);
+    return true;
 }
 
 void RequestRestart(const Config& cfg)
@@ -1023,6 +1116,7 @@ void RequestRestart(const Config& cfg)
     if (g.restart != 0) return;
     // 重开将按当前 Active 配置排队，不能在重开完后再补套旧的面板选择。
     g_pendingEquipApply.store(0, std::memory_order_release);
+    g_externalAllowInQuest.store(false, std::memory_order_release);
     if (cfg.activeSet > 0) {
         if (const LoadoutSet* s = cfg.FindSetById(cfg.activeSet)) QueueSet(*s);
         else ChatOnce(ChatNotice::MissingActiveSet, i18n::Fmt(i18n::Tr("Better-IN-Q：配置里没有编号 %d 的全套",
@@ -1067,10 +1161,10 @@ void RequestResetOnly()
     g.restart = 1;
 }
 
-bool RequestPouchRefill(const Config& cfg)
+bool RequestPouchRefill(const Config& cfg, bool ignoreHotkeyGate)
 {
     ActiveCall call;
-    if (!call || !cfg.enabled || !cfg.refillHotkey || !g_ready) return false;
+    if (!call || !cfg.enabled || (!ignoreHotkeyGate && !cfg.refillHotkey) || !g_ready) return false;
     g_refillRequest.store(true, std::memory_order_release);
     return true;
 }
@@ -1400,9 +1494,8 @@ void Tick(const Config& cfg)
     }
 
     // 钩子里攒下的提示
-    const std::uint32_t m = g.message;
+    const std::uint32_t m = TakeMsgBits();
     if (m) {
-        g.message = 0;
         if (m & kMsgEquip) ChatOnce(ChatNotice::InvalidEquip, i18n::Tr("Better-IN-Q：这个装备套装是空的或无效",
                                          "Better-IN-Q: that loadout is empty or invalid",
                                          "Better-IN-Q：その装備セットは空か無効です"));
