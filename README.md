@@ -57,6 +57,7 @@ Better-IN-Q 只在界面、bug 修复和使用体验上做了优化，没有参�
   三个技能一起带）、界面语言、Reset / Accept only 一起搬过来；
   原版的手柄快捷键不搬（原版没有面板，面板组合请在插件设置页自行录制）。第一次运行且还没有全套时，会自动在 ini 同层和上一层找一次 config.txt
 - 相比原版 IN-Q：做成插件，不再有「开游戏检测不到」；修了道具套装排过序后套错的问题；修了黑龙开局脱衣装
+- 可选外部自动化 C ABI v1（[`include/betterinq_api.h`](include/betterinq_api.h)）：通过导出函数 `BetterINQ_AcquireApi` / `BetterINQ_IsInstalled` 向白名单同进程插件开放状态查询、会话配置、装备/猫饭/道具请求及重开/只重置指令。`BetterINQ.ini` 中 `[Api]`（`Enabled` / `Whitelist`）默认关闭，且不随 `.biq` 便携备份导出/导入
 
 ## 安装（玩家）
 
@@ -99,6 +100,12 @@ powershell -ExecutionPolicy Bypass -File install.ps1          # 装进游戏目�
 py -3 tools/make_zip.py                                       # 打发布包
 ```
 
+### 测试与双轨验证
+
+`build.ps1 all` 会编译并运行全部 **27 项单元测试**（含 `api_test` 与桌面/覆盖层回归）。在 Windows 锁屏或无头环境下，5 项桌面交互测试（`cursor_test`、`ime_test`、`window_chain_test`、`overlay_test`、`overlay_dx12_test`）会自动切换至假后端及离屏 WARP 交换链桩完成回归（也可通过 `--headless` 或环境变量 `BETTERINQ_HEADLESS=1` 强制启用）。
+
+若需在宿主机锁屏期间验证**非无头真硬件 DX11/DX12 交换链、真 Win32 光标与 IMM32**，可配合常驻解锁的 Hyper-V GPU-P 虚拟机桌面（Session 1）执行真桌面验收；详见 [`docs/testing.md`](docs/testing.md)。
+
 产物 `out\BetterINQ.dll`。`/MT` 静态链接 CRT，**运行游戏时也不依赖任何第三方运行库** ——
 `dumpbin /dependents` 只看到 `d3d11 / dxgi / D3DCOMPILER_47 / imm32 / user32 / kernel32 / shell32`
 这些 Windows 自带的东西，既不需要 MinGW 的 `libstdc++-6.dll`、也不需要 VC 运行库。
@@ -133,6 +140,7 @@ MSVC 走 `tests/hook_test_asm.asm`（ml64 汇编），两边摆出来的指令�
 | 路径 | 内容 |
 | --- | --- |
 | `src/main.cpp` | 插件入口、主循环、快捷键 |
+| `include/betterinq_api.h` / `src/api.*` | 外部白名单插件自动化 C ABI v1（`BetterINQ_AcquireApi` / 命令队列） |
 | `src/inq.*` | 重开的状态机和游戏挂钩（移植自 INQ.CT） |
 | `src/hook.*` | 往游戏代码里插跳转、按值换函数指针 |
 | `src/overlay.*` | 挂 DXGI Present，用 Dear ImGui 画面板（D3D11 / D3D12） |
@@ -143,7 +151,8 @@ MSVC 走 `tests/hook_test_asm.asm`（ml64 汇编），两边摆出来的指令�
 | `src/config.*` / `src/input.*` / `src/gamedata.*` | 配置文件、快捷键、任务表 |
 | `tools/gen_quests.py` / `tools/gen_foodskills.py` | 从 INQ.CT 生成 `src/quests.inc` / `src/foodskills.inc` |
 | `tools/gen_ja_reading.py` | 给 `src/quests.inc` 补日文假名 / 罗马音读音（pykakasi） |
-| `tests/` | 单元测试（`build.ps1 all` 会跑） |
+| `tests/` | 单元测试（`build.ps1 all` 会跑，含 `tests/offscreen_swapchain.h` 离屏 DXGI 桩） |
+| `docs/testing.md` | 无头回退与 Hyper-V GPU-P 虚拟机真桌面双轨测试指南 |
 | `build.ps1` / `install.ps1` | MSVC 构建脚本 / 安装脚本（不需要 MinGW） |
 | `build.sh` / `install.sh` | 同一套东西的 MinGW 版本（可选） |
 | `third_party/imgui/` | [Dear ImGui](https://github.com/ocornut/imgui)（MIT 许可，见其中的 LICENSE.txt） |
