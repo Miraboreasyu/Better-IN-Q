@@ -38,5 +38,7 @@ bool Failed();   // 渲染端初始化失败（比如游戏开的是 DX12），�
 void SetDebugAfterDraw(void (*fn)(void* backbuffer));
 // 同上，D3D12：参数是 ID3D12Resource*（后台缓冲，处于 PRESENT 状态）和 ID3D12CommandQueue*（游戏的队列）
 void SetDebugAfterDraw12(void (*fn)(void* backbuffer, void* queue));
+// 测试用：直接挂到指定交换链对象的虚表（支持离屏 WARP 假交换链，不依赖活动桌面）
+bool InstallOnSwapChain(const Callbacks& cb, void* swapChain, std::string& err);
 
 } // namespace overlay

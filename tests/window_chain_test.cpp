@@ -3,6 +3,7 @@
 #include "../src/overlay.cpp"
 #include "../src/crashfilter.h"
 #include "../src/hangdump.h"
+#include "offscreen_swapchain.h"
 #include <cstdio>
 #include <fstream>
 #include <future>
@@ -50,10 +51,14 @@ static LRESULT CALLBACK Wrapper(HWND h,UINT m,WPARAM w,LPARAM l) {
     if(wrapperBounces) return SendMessageW(h,m,w,l);   // 原地把消息派回窗口顶端的窗口过程
     return CallWindowProcW(wrapperPrevious,h,m,w,l);
 }
+static bool g_headless = false;
 struct Window {
     HWND h=nullptr; IDXGISwapChain* sc=nullptr; ID3D11Device* dev=nullptr; ID3D11DeviceContext* ctx=nullptr;
     bool Create() {
         h=CreateWindowExW(0,L"BetterINQ_window_chain_test",L"isolated exit regression",WS_OVERLAPPEDWINDOW,0,0,320,240,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
+        if (!h) return false;
+        if (g_headless)
+            return SUCCEEDED(offscreen_test::CreateOffscreenD3D11(h,320,240,DXGI_FORMAT_R8G8B8A8_UNORM,2,&sc,&dev,&ctx));
         DXGI_SWAP_CHAIN_DESC sd{}; sd.BufferCount=2; sd.BufferDesc.Width=320; sd.BufferDesc.Height=240;
         sd.BufferDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM; sd.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;
         sd.OutputWindow=h; sd.SampleDesc.Count=1; sd.Windowed=TRUE; sd.SwapEffect=DXGI_SWAP_EFFECT_FLIP_DISCARD;
@@ -151,11 +156,23 @@ static void TestPresentBoundary() {
     overlay::g_present=savedPresent;
     overlay::g_dead=savedDead;
 }
-int main() {
+int main(int argc, char** argv) {
+    g_headless = offscreen_test::IsHeadlessRequested(argc, argv);
     TestPresentBoundary();
     WNDCLASSEXW wc{sizeof(wc)}; wc.lpfnWndProc=GameProc; wc.hInstance=GetModuleHandleW(nullptr); wc.lpszClassName=L"BetterINQ_window_chain_test"; RegisterClassExW(&wc);
-    std::string err; overlay::Callbacks cb; CHECK(overlay::Install(cb,err));
+    std::string err; overlay::Callbacks cb;
+    bool installed = false;
+    if (!g_headless) {
+        installed = overlay::Install(cb, err);
+        if (!installed) {
+            std::printf("info: overlay::Install unavailable (%s), switching to headless offscreen WARP\n", err.c_str());
+            g_headless = true;
+            err.clear();
+        }
+    }
     Window a; if(!a.Create()) return 2;
+    if (!installed) installed = overlay::InstallOnSwapChain(cb, a.sc, err);
+    CHECK(installed);
     CHECK(overlay::InitRenderer(a.sc)==1);
     CHECK(overlay::PreviousProc(a.h)==GameProc);
     // Real contention: the window thread must return while a different thread

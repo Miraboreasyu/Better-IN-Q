@@ -16,6 +16,7 @@
 #include "../src/padfilter.h"
 #include "../src/ui.h"
 #include "../src/i18n.h"
+#include "offscreen_swapchain.h"
 #include "imgui.h"
 #include "imgui_internal.h"
 
@@ -177,7 +178,14 @@ static void Pad(XINPUT_STATE& s, WORD buttons) { std::memset(&s, 0, sizeof(s)); 
 
 int wmain(int argc, wchar_t** argv)
 {
-    const std::wstring out = argc > 1 ? argv[1] : L".";
+    std::wstring out = L".";
+    for (int i = 1; i < argc; ++i) {
+        if (std::wcscmp(argv[i], L"--headless") != 0) {
+            out = argv[i];
+            break;
+        }
+    }
+    const bool forceHeadless = offscreen_test::IsHeadlessRequested(argc, argv);
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
     // ---------------- 手柄过滤器 ----------------
@@ -220,16 +228,6 @@ int wmain(int argc, wchar_t** argv)
     WNDCLASSEXW wc{sizeof(wc)};
     wc.lpfnWndProc = DefWindowProcW; wc.hInstance = GetModuleHandleW(nullptr); wc.lpszClassName = L"binq_test";
     RegisterClassExW(&wc);
-    HWND hw = CreateWindowExW(0, wc.lpszClassName, L"MHW", WS_OVERLAPPEDWINDOW, 0, 0, 1936, 1119, nullptr, nullptr, wc.hInstance, nullptr);
-    RECT rc; GetClientRect(hw, &rc);
-    DXGI_SWAP_CHAIN_DESC sd{};
-    sd.BufferCount = 2; sd.BufferDesc.Width = rc.right; sd.BufferDesc.Height = rc.bottom;
-    sd.BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM; sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    sd.OutputWindow = hw; sd.SampleDesc.Count = 1; sd.Windowed = TRUE; sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    IDXGISwapChain* sc = nullptr;
-    ID3D11DeviceContext* ctx = nullptr;
-    HRESULT hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &sd, &sc, &g_dev, nullptr, &ctx);
-    CHECK(SUCCEEDED(hr), "建「游戏」的交换链 %ldx%ld", rc.right, rc.bottom);
 
     std::string err;
     LoadConfig(L"config\\BetterINQ.ini", g_cfg, err);
@@ -239,7 +237,46 @@ int wmain(int argc, wchar_t** argv)
     g_model.version = "0.2";
     overlay::Callbacks cb;
     cb.init = OnInit; cb.opened = OnOpened; cb.draw = OnDraw;
-    CHECK(overlay::Install(cb, err), "挂 Present / ResizeBuffers %s", err.c_str());
+
+    HWND hw = nullptr;
+    RECT rc{};
+    IDXGISwapChain* sc = nullptr;
+    ID3D11DeviceContext* ctx = nullptr;
+    HRESULT hr = E_FAIL;
+    bool headless = forceHeadless;
+    bool installed = false;
+
+    if (!headless) {
+        hw = CreateWindowExW(0, wc.lpszClassName, L"MHW", WS_OVERLAPPEDWINDOW, 0, 0, 1936, 1119, nullptr, nullptr, wc.hInstance, nullptr);
+        GetClientRect(hw, &rc);
+        DXGI_SWAP_CHAIN_DESC sd{};
+        sd.BufferCount = 2; sd.BufferDesc.Width = rc.right; sd.BufferDesc.Height = rc.bottom;
+        sd.BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM; sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        sd.OutputWindow = hw; sd.SampleDesc.Count = 1; sd.Windowed = TRUE; sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &sd, &sc, &g_dev, nullptr, &ctx);
+        if (SUCCEEDED(hr) && sc) installed = overlay::Install(cb, err);
+        if (FAILED(hr) || !sc || !installed) {
+            std::printf("  info: live DXGI unavailable (hr=%08lx, %s), falling back to headless offscreen WARP\n",
+                        (unsigned long)hr, err.c_str());
+            if (sc) { sc->Release(); sc = nullptr; }
+            if (ctx) { ctx->Release(); ctx = nullptr; }
+            if (g_dev) { g_dev->Release(); g_dev = nullptr; }
+            if (hw) { DestroyWindow(hw); hw = nullptr; }
+            err.clear();
+            headless = true;
+            installed = false;
+        }
+    }
+    if (headless) {
+        hw = CreateWindowExW(0, wc.lpszClassName, L"MHW", WS_POPUP, 0, 0, 1920, 1080, nullptr, nullptr, wc.hInstance, nullptr);
+        GetClientRect(hw, &rc);
+        hr = offscreen_test::CreateOffscreenD3D11(hw, 1920, 1080, DXGI_FORMAT_B8G8R8A8_UNORM, 2, &sc, &g_dev, &ctx);
+        if (SUCCEEDED(hr) && sc) installed = overlay::InstallOnSwapChain(cb, sc, err);
+    }
+
+    CHECK(SUCCEEDED(hr) && sc && g_dev && ctx, "建「游戏」的交换链 %ldx%ld", rc.right, rc.bottom);
+    CHECK(installed, "挂 Present / ResizeBuffers %s", err.c_str());
+    if (!sc || !g_dev || !ctx || !installed) return 1;
     overlay::SetDebugAfterDraw(Save);
 
     auto frame = [&](float r, float g, float b) {
@@ -380,14 +417,19 @@ int wmain(int argc, wchar_t** argv)
     // 进程里还有别人建的 D3D11 交换链（别的模组、工具窗口）：同一张虚表，Present 也会走到钩子里，
     // 但面板只能画在游戏自己的交换链上
     {
-        HWND hw2 = CreateWindowExW(0, wc.lpszClassName, L"other", WS_OVERLAPPEDWINDOW, 0, 0, 656, 519, nullptr, nullptr,
-                                   wc.hInstance, nullptr);
-        DXGI_SWAP_CHAIN_DESC sd2 = sd;
-        RECT rc2; GetClientRect(hw2, &rc2);
-        sd2.BufferDesc.Width = rc2.right; sd2.BufferDesc.Height = rc2.bottom; sd2.OutputWindow = hw2;
+        HWND hw2 = CreateWindowExW(0, wc.lpszClassName, L"other", headless ? WS_POPUP : WS_OVERLAPPEDWINDOW, 0, 0,
+                                   headless ? 640 : 656, headless ? 480 : 519, nullptr, nullptr, wc.hInstance, nullptr);
+        RECT rc2{}; GetClientRect(hw2, &rc2);
         IDXGISwapChain* sc2 = nullptr; ID3D11Device* dev2 = nullptr; ID3D11DeviceContext* ctx2 = nullptr;
-        D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &sd2, &sc2,
-                                      &dev2, nullptr, &ctx2);
+        if (headless) {
+            offscreen_test::CreateOffscreenD3D11(hw2, rc2.right, rc2.bottom, DXGI_FORMAT_B8G8R8A8_UNORM, 2, &sc2, &dev2, &ctx2);
+        } else {
+            DXGI_SWAP_CHAIN_DESC sd2{};
+            sc->GetDesc(&sd2);
+            sd2.BufferDesc.Width = rc2.right; sd2.BufferDesc.Height = rc2.bottom; sd2.OutputWindow = hw2;
+            D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &sd2, &sc2,
+                                          &dev2, nullptr, &ctx2);
+        }
         const int before = g_draws;
         for (int i = 0; i < 5; ++i) if (sc2) sc2->Present(0, 0);
         CHECK(sc2 && g_draws == before, "别人的交换链 Present 了 5 次：面板一次都没往上画（draws %d → %d）", before, g_draws);
@@ -738,6 +780,7 @@ int wmain(int argc, wchar_t** argv)
     frame(0, 0, 0);
     CHECK(g_draws == beforeClose, "关掉后不再画");
 
+    overlay::Shutdown();
     sc->Release(); ctx->Release(); g_dev->Release();
     DestroyWindow(hw);
     std::printf("\n%s（%d 项失败）\n", g_fail ? "有失败" : "全部通过", g_fail);

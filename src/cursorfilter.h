@@ -14,9 +14,22 @@
 //  做法和 padfilter 一样：在游戏模块的数据段里按值找到这几个函数的指针，换成我们的。
 //  面板自己（ImGui）调的是我们 DLL 导入表里的原函数，不受影响。
 // ============================================================================
+#include <windows.h>
 #include <string>
 
 namespace cursorfilter {
+
+// 测试注入：无头 / 锁屏环境下替换真实 user32 光标与屏幕查询
+struct TestOps {
+    BOOL(WINAPI* setPos)(int, int) = nullptr;
+    BOOL(WINAPI* getPos)(LPPOINT) = nullptr;
+    BOOL(WINAPI* clip)(const RECT*) = nullptr;
+    BOOL(WINAPI* getClip)(LPRECT) = nullptr;
+    RECT virtualScreen{};
+    bool hasGameWindow = false;
+    RECT gameWindow{};
+};
+void SetTestOps(const TestOps* ops);
 
 // 找到并替换游戏模块里的 SetCursorPos / GetCursorPos / ClipCursor 指针。
 // 一个 SetCursorPos 都没找到时返回 false，可以过一会儿再试。

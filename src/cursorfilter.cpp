@@ -16,6 +16,7 @@ namespace {
 typedef BOOL(WINAPI* SetPosFn)(int, int);
 typedef BOOL(WINAPI* GetPosFn)(LPPOINT);
 typedef BOOL(WINAPI* ClipFn)(const RECT*);
+typedef BOOL(WINAPI* GetClipFn)(LPRECT);
 
 // 原函数（GetProcAddress 拿的）。换指针时要跳过这张表本身，理由同 padfilter。
 struct Orig {
@@ -25,6 +26,8 @@ struct Orig {
 } g_orig = {};
 
 std::mutex g_mx;         // 钩子在游戏线程里跑，SetBlock 在主循环里调
+TestOps g_testOps = {};
+bool g_hasTestOps = false;
 bool g_block = false;
 POINT g_pos = {};        // 面板开着时游戏读到的光标位置
 bool g_moved = false;    // 面板开着时游戏挪过光标 → 关面板时真挪过去
@@ -34,15 +37,21 @@ bool g_clipDirty = false;   // 面板开着期间锁定范围被动过 → 关�
 bool g_installed = false;
 std::atomic<long> g_reads{0};   // 面板开着时游戏读了几次光标位置（诊断）
 
+SetPosFn ActiveSetPos() { return (g_hasTestOps && g_testOps.setPos) ? g_testOps.setPos : g_orig.setPos; }
+GetPosFn ActiveGetPos() { return (g_hasTestOps && g_testOps.getPos) ? g_testOps.getPos : g_orig.getPos; }
+ClipFn ActiveClip() { return (g_hasTestOps && g_testOps.clip) ? g_testOps.clip : g_orig.clip; }
+GetClipFn ActiveGetClip() { return (g_hasTestOps && g_testOps.getClip) ? g_testOps.getClip : ::GetClipCursor; }
+
 // 诊断：游戏每帧调了这些钩子几次、每次花多久（日志 perf 行）
 std::atomic<long long> g_calls{0}, g_us{0}, g_maxUs{0};
 
 long long NowUs()
 {
     static const long long freq = [] { LARGE_INTEGER f; ::QueryPerformanceFrequency(&f); return f.QuadPart; }();
+    if (freq <= 0) return 0;
     LARGE_INTEGER t;
     ::QueryPerformanceCounter(&t);
-    return t.QuadPart * 1000000LL / freq;
+    return (t.QuadPart / freq) * 1000000LL + ((t.QuadPart % freq) * 1000000LL) / freq;
 }
 
 void Rec(long long t0)
@@ -61,7 +70,7 @@ BOOL WINAPI HkSetCursorPos(int x, int y)
     BOOL r;
     {
         std::lock_guard<std::mutex> lk(g_mx);
-        if (!g_block) r = g_orig.setPos(x, y);
+        if (!g_block) r = ActiveSetPos()(x, y);
         else {
             g_pos = {x, y};
             g_moved = true;
@@ -78,7 +87,7 @@ BOOL WINAPI HkGetCursorPos(LPPOINT p)
     BOOL r;
     {
         std::lock_guard<std::mutex> lk(g_mx);
-        if (!g_block || !p) r = g_orig.getPos(p);
+        if (!g_block || !p) r = ActiveGetPos()(p);
         else {
             ++g_reads;
             *p = g_pos;
@@ -92,7 +101,7 @@ BOOL WINAPI HkGetCursorPos(LPPOINT p)
 BOOL WINAPI HkClipCursor(const RECT* r)
 {
     std::lock_guard<std::mutex> lk(g_mx);
-    if (!g_block) return g_orig.clip(r);
+    if (!g_block) return ActiveClip()(r);
     g_clipOn = r != nullptr;
     if (r) g_clip = *r;
     g_clipDirty = true;
@@ -101,6 +110,11 @@ BOOL WINAPI HkClipCursor(const RECT* r)
 
 bool IsWholeScreen(const RECT& r)
 {
+    if (g_hasTestOps && g_testOps.virtualScreen.right > g_testOps.virtualScreen.left &&
+        g_testOps.virtualScreen.bottom > g_testOps.virtualScreen.top) {
+        const RECT& v = g_testOps.virtualScreen;
+        return r.left <= v.left && r.top <= v.top && r.right >= v.right && r.bottom >= v.bottom;
+    }
     const int x = ::GetSystemMetrics(SM_XVIRTUALSCREEN), y = ::GetSystemMetrics(SM_YVIRTUALSCREEN);
     return r.left <= x && r.top <= y && r.right >= x + ::GetSystemMetrics(SM_CXVIRTUALSCREEN) &&
            r.bottom >= y + ::GetSystemMetrics(SM_CYVIRTUALSCREEN);
@@ -109,6 +123,11 @@ bool IsWholeScreen(const RECT& r)
 // 前台窗口是本进程的，就当它是游戏窗口，取客户区的屏幕坐标
 bool GameWindowRect(RECT& r)
 {
+    if (g_hasTestOps) {
+        if (!g_testOps.hasGameWindow) return false;
+        r = g_testOps.gameWindow;
+        return r.right > r.left && r.bottom > r.top;
+    }
     HWND h = ::GetForegroundWindow();
     DWORD pid = 0;
     if (!h || !::GetWindowThreadProcessId(h, &pid) || pid != ::GetCurrentProcessId()) return false;
@@ -118,6 +137,18 @@ bool GameWindowRect(RECT& r)
 }
 
 } // namespace
+
+void SetTestOps(const TestOps* ops)
+{
+    std::lock_guard<std::mutex> lk(g_mx);
+    if (ops) {
+        g_testOps = *ops;
+        g_hasTestOps = true;
+    } else {
+        g_testOps = {};
+        g_hasTestOps = false;
+    }
+}
 
 bool Install(std::string& info)
 {
@@ -164,19 +195,23 @@ void SetBlock(bool block)
 {
     std::lock_guard<std::mutex> lk(g_mx);
     if (!g_installed || block == g_block) return;
+    const GetPosFn getPos = ActiveGetPos();
+    const SetPosFn setPos = ActiveSetPos();
+    const ClipFn clip = ActiveClip();
+    const GetClipFn getClip = ActiveGetClip();
     if (block) {
         // 从这一刻起游戏读到的光标位置不再变
-        if (!g_orig.getPos(&g_pos)) g_pos = {};
+        if (!getPos(&g_pos)) g_pos = {};
         g_moved = false;
         // 游戏正锁着光标的话记下来，换成锁在游戏窗口里：面板能点到，光标也跑不出窗口
         RECT cur{}, win{};
-        g_clipOn = ::GetClipCursor(&cur) && !IsWholeScreen(cur);
+        g_clipOn = getClip(&cur) && !IsWholeScreen(cur);
         g_clip = cur;
         g_clipDirty = g_clipOn;
-        if (g_clipOn) g_orig.clip(GameWindowRect(win) ? &win : nullptr);
+        if (g_clipOn) clip(GameWindowRect(win) ? &win : nullptr);
     } else {
-        if (g_moved) g_orig.setPos(g_pos.x, g_pos.y);   // 放回游戏想放的地方，关面板那一帧视角不会猛跳
-        if (g_clipDirty) g_orig.clip(g_clipOn ? &g_clip : nullptr);
+        if (g_moved) setPos(g_pos.x, g_pos.y);   // 放回游戏想放的地方，关面板那一帧视角不会猛跳
+        if (g_clipDirty) clip(g_clipOn ? &g_clip : nullptr);
     }
     g_block = block;
 }

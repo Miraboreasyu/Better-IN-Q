@@ -272,10 +272,24 @@ std::atomic<bool> g_dead{false};
 std::atomic<bool> g_wndHook{true};
 unsigned g_imeTick = 0;
 
+struct ImmOps {
+    HIMC (WINAPI* getContext)(HWND) = ::ImmGetContext;
+    BOOL (WINAPI* releaseContext)(HWND, HIMC) = ::ImmReleaseContext;
+    HIMC (WINAPI* createContext)() = ::ImmCreateContext;
+    BOOL (WINAPI* destroyContext)(HIMC) = ::ImmDestroyContext;
+    HIMC (WINAPI* associateContext)(HWND, HIMC) = ::ImmAssociateContext;
+    BOOL (WINAPI* notifyIme)(HIMC, DWORD, DWORD, DWORD) = ::ImmNotifyIME;
+    BOOL (WINAPI* setOpenStatus)(HIMC, BOOL) = ::ImmSetOpenStatus;
+    BOOL (WINAPI* setCompositionWindow)(HIMC, LPCOMPOSITIONFORM) = ::ImmSetCompositionWindow;
+    BOOL (WINAPI* setCandidateWindow)(HIMC, LPCANDIDATEFORM) = ::ImmSetCandidateWindow;
+    LONG (WINAPI* getCompositionStringW)(HIMC, DWORD, LPVOID, DWORD) = ::ImmGetCompositionStringW;
+};
+ImmOps g_imm;
+
 HIMC ImeContext(HWND h)
 {
-    HIMC c = ::ImmGetContext(h);
-    if (c) ::ImmReleaseContext(h, c);
+    HIMC c = g_imm.getContext(h);
+    if (c) g_imm.releaseContext(h, c);
     return c;
 }
 
@@ -294,10 +308,10 @@ void ImeOffWindowThread(HWND h = nullptr)
     if (owned) {
         // 游戏已经换成其他上下文（包括 nullptr）时，不能覆盖它的新决定。
         if (ImeContext(h) == owned) {
-            ::ImmNotifyIME(owned, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
-            ::ImmAssociateContext(h, previous);
+            g_imm.notifyIme(owned, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
+            g_imm.associateContext(h, previous);
         }
-        ::ImmDestroyContext(owned);
+        g_imm.destroyContext(owned);
     }
     g_imeAppliedWant = false;
     g_imeSyncing = false;
@@ -314,20 +328,20 @@ void ImeSyncOnWindowThread(HWND h)
     if (g_imeOwner && g_imeOwner != h) return;
     g_imeSyncing = true;
     if (!g_imc) {
-        g_imc = ::ImmCreateContext();
+        g_imc = g_imm.createContext();
         if (!g_imc) { g_imeSyncing = false; return; }
         g_imeOwner = h;
-        g_imcPrev = ::ImmAssociateContext(h, g_imc);
+        g_imcPrev = g_imm.associateContext(h, g_imc);
         g_imeAppliedWant = !g_imeWant.load(); // 强制应用初始开关状态
     } else if (ImeContext(h) != g_imc) {
         // 保存游戏最新的关联，包含“主动摘下”的 nullptr。
-        g_imcPrev = ::ImmAssociateContext(h, g_imc);
+        g_imcPrev = g_imm.associateContext(h, g_imc);
         ++g_imeFix;
     }
     const bool want = g_imeWant.load();
     if (want != g_imeAppliedWant) {
         if (want) ime_candidates::Start(); else ime_candidates::Stop();
-        ::ImmSetOpenStatus(g_imc, want ? TRUE : FALSE);
+        g_imm.setOpenStatus(g_imc, want ? TRUE : FALSE);
         g_imeAppliedWant = want;
     }
     g_imeSyncing = false;
@@ -341,21 +355,21 @@ void ImeSetPosOnWindowThread(HWND h, int x, int y, unsigned generation)
     if (generation != g_imeGeneration.load() || !PanelOpen() || !g_imeAttached.load() ||
         !g_imeWant.load() || h != g_imeOwner || !g_imc || g_imeSyncing ||
         ::GetWindowThreadProcessId(h, nullptr) != ::GetCurrentThreadId()) return;
-    HIMC c = ::ImmGetContext(h);
+    HIMC c = g_imm.getContext(h);
     if (!c) return;
-    if (c != g_imc) { ::ImmReleaseContext(h, c); return; }
+    if (c != g_imc) { g_imm.releaseContext(h, c); return; }
     COMPOSITIONFORM cf{};
     cf.dwStyle = CFS_POINT;
     cf.ptCurrentPos.x = x;
     cf.ptCurrentPos.y = y;
-    ::ImmSetCompositionWindow(c, &cf);
+    g_imm.setCompositionWindow(c, &cf);
     CANDIDATEFORM cand{};
     cand.dwIndex = 0;
     cand.dwStyle = CFS_CANDIDATEPOS;
     cand.ptCurrentPos.x = x;
     cand.ptCurrentPos.y = y + 2;
-    ::ImmSetCandidateWindow(c, &cand);
-    ::ImmReleaseContext(h, c);
+    g_imm.setCandidateWindow(c, &cand);
+    g_imm.releaseContext(h, c);
 }
 
 void ImeSetPos(int x, int y)
@@ -692,16 +706,16 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l)
             ++g_imeComp;
             if (l & GCS_RESULTSTR) {
                 ++g_imeResult;
-                if (HIMC imc = ::ImmGetContext(h)) {
-                    const LONG bytes = ::ImmGetCompositionStringW(imc, GCS_RESULTSTR, nullptr, 0);
+                if (HIMC imc = g_imm.getContext(h)) {
+                    const LONG bytes = g_imm.getCompositionStringW(imc, GCS_RESULTSTR, nullptr, 0);
                     if (bytes > 0 && bytes <= (LONG)(kInputCapacity * sizeof(wchar_t))) {
                         std::array<wchar_t, kInputCapacity> text{};
-                        const LONG copied = ::ImmGetCompositionStringW(imc, GCS_RESULTSTR, text.data(), bytes);
+                        const LONG copied = g_imm.getCompositionStringW(imc, GCS_RESULTSTR, text.data(), bytes);
                         if (copied > 0 && copied <= bytes)
                             for (LONG i = 0; i < copied / (LONG)sizeof(wchar_t); ++i)
                                 QueuePanelInput(inputTicket, {InputKind::Character, (int)text[i]});
                     }
-                    ::ImmReleaseContext(h, imc);
+                    g_imm.releaseContext(h, imc);
                 }
             }
             return 0;   // 不给游戏，也不让系统再生成一份
@@ -1352,13 +1366,9 @@ void** GetSwapChainVtable(std::string& err, void*** vt3)
 }
 
 
-} // namespace
-
-bool Install(const Callbacks& cb, std::string& err)
+bool InstallWithVtable(const Callbacks& cb, void** vt, void** vt3, std::string& err)
 {
     g_cb = cb;
-    void** vt3 = nullptr;
-    void** vt = GetSwapChainVtable(err, &vt3);
     if (!vt) return false;
     g_swapVt = vt;
     g_swapVt3 = vt3;
@@ -1372,6 +1382,33 @@ bool Install(const Callbacks& cb, std::string& err)
         Log("overlay: ResizeBuffers1 没挂上（不影响 D3D11）");
     Log("overlay: Present 已挂（原 %p）", reinterpret_cast<void*>(g_present));
     return true;
+}
+
+} // namespace
+
+bool Install(const Callbacks& cb, std::string& err)
+{
+    void** vt3 = nullptr;
+    void** vt = GetSwapChainVtable(err, &vt3);
+    if (!vt) return false;
+    return InstallWithVtable(cb, vt, vt3, err);
+}
+
+bool InstallOnSwapChain(const Callbacks& cb, void* swapChain, std::string& err)
+{
+    if (!swapChain) {
+        err = "null swap chain";
+        return false;
+    }
+    IDXGISwapChain* sc = static_cast<IDXGISwapChain*>(swapChain);
+    void** vt = *reinterpret_cast<void***>(sc);
+    void** vt3 = nullptr;
+    IDXGISwapChain3* sc3 = nullptr;
+    if (SUCCEEDED(sc->QueryInterface(__uuidof(IDXGISwapChain3), reinterpret_cast<void**>(&sc3))) && sc3) {
+        vt3 = *reinterpret_cast<void***>(sc3);
+        sc3->Release();
+    }
+    return InstallWithVtable(cb, vt, vt3, err);
 }
 
 void SetOpen(bool open)

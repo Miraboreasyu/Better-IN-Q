@@ -14,6 +14,7 @@
 #include "../src/overlay.cpp"
 #include "../src/ui.h"
 #include "../src/i18n.h"
+#include "offscreen_swapchain.h"
 
 static int g_fail = 0;
 #define CHECK(cond, ...) do { if (cond) std::printf("  ok   " __VA_ARGS__); \
@@ -122,7 +123,14 @@ static void Save12(void* res, void* queue)
 
 int wmain(int argc, wchar_t** argv)
 {
-    const std::wstring out = argc > 1 ? argv[1] : L".";
+    std::wstring out = L".";
+    for (int i = 1; i < argc; ++i) {
+        if (std::wcscmp(argv[i], L"--headless") != 0) {
+            out = argv[i];
+            break;
+        }
+    }
+    const bool forceHeadless = offscreen_test::IsHeadlessRequested(argc, argv);
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     std::string err;
     LoadConfig(L"config\\BetterINQ.ini", g_cfg, err);
@@ -130,13 +138,6 @@ int wmain(int argc, wchar_t** argv)
     g_model.cfg = &g_cfg;
     g_model.ready = true;
     g_model.version = "dx12";
-
-    overlay::Callbacks cb;
-    cb.init = OnInit;
-    cb.opened = OnOpened;
-    cb.draw = OnDraw;
-    CHECK(overlay::Install(cb, err), "挂 Present / ResizeBuffers %s", err.c_str());
-    overlay::SetDebugAfterDraw12(Save12);
 
     IDXGIFactory4* fac = nullptr;
     CreateDXGIFactory1(__uuidof(IDXGIFactory4), reinterpret_cast<void**>(&fac));
@@ -152,13 +153,18 @@ int wmain(int argc, wchar_t** argv)
     dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), reinterpret_cast<void**>(&fence));
     fenceEv = CreateEventW(nullptr, FALSE, FALSE, nullptr);
 
+    overlay::Callbacks cb;
+    cb.init = OnInit;
+    cb.opened = OnOpened;
+    cb.draw = OnDraw;
+    overlay::SetDebugAfterDraw12(Save12);
+
     WNDCLASSEXW wc{sizeof(wc)};
     wc.lpfnWndProc = DefWindowProcW;
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.lpszClassName = L"binq_dx12_test";
     RegisterClassExW(&wc);
-    HWND hw = CreateWindowExW(0, wc.lpszClassName, L"MHW DX12", WS_OVERLAPPEDWINDOW, 0, 0, 1936, 1119, nullptr, nullptr,
-                              wc.hInstance, nullptr);
+
     DXGI_SWAP_CHAIN_DESC1 sd{};
     sd.Width = 1920; sd.Height = 1080;
     sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -166,10 +172,40 @@ int wmain(int argc, wchar_t** argv)
     sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     sd.BufferCount = 3;
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+
+    HWND hw = nullptr;
     IDXGISwapChain1* sc1 = nullptr;
-    HRESULT hr = fac->CreateSwapChainForHwnd(queue, hw, &sd, nullptr, nullptr, &sc1);
+    HRESULT hr = E_FAIL;
+    bool headless = forceHeadless;
+    bool installed = false;
+
+    if (!headless) {
+        installed = overlay::Install(cb, err);
+        if (installed) {
+            hw = CreateWindowExW(0, wc.lpszClassName, L"MHW DX12", WS_OVERLAPPEDWINDOW, 0, 0, 1936, 1119, nullptr, nullptr,
+                                 wc.hInstance, nullptr);
+            hr = fac->CreateSwapChainForHwnd(queue, hw, &sd, nullptr, nullptr, &sc1);
+        }
+        if (!installed || FAILED(hr) || !sc1) {
+            std::printf("  info: live D3D12 swapchain unavailable (hr=%08lx, %s), falling back to headless offscreen WARP\n",
+                        (unsigned long)hr, err.c_str());
+            if (sc1) { sc1->Release(); sc1 = nullptr; }
+            if (hw) { DestroyWindow(hw); hw = nullptr; }
+            err.clear();
+            headless = true;
+            installed = false;
+        }
+    }
+    if (headless) {
+        hw = CreateWindowExW(0, wc.lpszClassName, L"MHW DX12", WS_POPUP, 0, 0, 1920, 1080, nullptr, nullptr,
+                             wc.hInstance, nullptr);
+        hr = offscreen_test::CreateOffscreenD3D12(dev, hw, 1920, 1080, DXGI_FORMAT_R8G8B8A8_UNORM, 3, &sc1);
+        if (SUCCEEDED(hr) && sc1) installed = overlay::InstallOnSwapChain(cb, sc1, err);
+    }
+
+    CHECK(installed, "挂 Present / ResizeBuffers %s", err.c_str());
     CHECK(SUCCEEDED(hr) && sc1, "建 D3D12 交换链（hr=%08lx）", (unsigned long)hr);
-    if (!sc1) return 1;
+    if (!installed || !sc1) return 1;
     IDXGISwapChain3* sc = nullptr;
     sc1->QueryInterface(__uuidof(IDXGISwapChain3), reinterpret_cast<void**>(&sc));
 
@@ -244,12 +280,16 @@ int wmain(int argc, wchar_t** argv)
     // A new format/device must invalidate this frame and rebuild before drawing again.
     // A second HWND allows both real swap chains to remain alive; substitute only
     // the window identity to exercise the same-window replacement branch.
-    HWND hw2 = CreateWindowExW(0, wc.lpszClassName, L"MHW DX12 replacement", WS_OVERLAPPEDWINDOW,
+    HWND hw2 = CreateWindowExW(0, wc.lpszClassName, L"MHW DX12 replacement", headless ? WS_POPUP : WS_OVERLAPPEDWINDOW,
                                0, 0, 1280, 720, nullptr, nullptr, wc.hInstance, nullptr);
     IDXGISwapChain1* replacement = nullptr;
-    sd.Width = 1280; sd.Height = 720;
-    sd.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
-    hr = fac->CreateSwapChainForHwnd(queue, hw2, &sd, nullptr, nullptr, &replacement);
+    if (headless) {
+        hr = offscreen_test::CreateOffscreenD3D12(dev, hw2, 1280, 720, DXGI_FORMAT_R10G10B10A2_UNORM, 3, &replacement);
+    } else {
+        sd.Width = 1280; sd.Height = 720;
+        sd.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+        hr = fac->CreateSwapChainForHwnd(queue, hw2, &sd, nullptr, nullptr, &replacement);
+    }
     CHECK(SUCCEEDED(hr) && replacement, "replacement swap chain created");
     if (!replacement) return 1;
     WaitQueue(queue);
